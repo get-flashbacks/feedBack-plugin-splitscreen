@@ -4742,10 +4742,15 @@ try {
     // window.showScreen — see feedBack#923/#924: core's own navigation calls
     // its internal showScreen() directly, never window.showScreen, so a
     // patch here would silently never fire for real navigation.
+    // Split into a pure decision fn so it's testable without a full
+    // startSplitScreen()/stopSplitScreen() DOM round-trip.
+    function _shouldTeardownOnScreenChange(id) {
+        return !FOLLOWER && id !== 'player' && active;
+    }
     if (window.feedBack) {
         window.feedBack.on('screen:changing', (e) => {
             const id = e.detail && e.detail.id;
-            if (!FOLLOWER && id !== 'player' && active) stopSplitScreen();
+            if (_shouldTeardownOnScreenChange(id)) stopSplitScreen();
         });
     }
 
@@ -5855,6 +5860,10 @@ try {
             stopLanShare,
             _setLanShareForTest(next) { _lanShare = next; },
             _getLanShareForTest() { return _lanShare; },
+            _shouldTeardownOnScreenChange,
+            _setActiveForTest(next) { active = next; },
+            _installFollowerAudioShim,
+            _setFollowerPlayingForTest(next) { _followerPlaying = next; },
         };
     }
 })();

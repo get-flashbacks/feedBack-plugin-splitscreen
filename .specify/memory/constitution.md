@@ -60,16 +60,17 @@ tab pane, 3D highway. Tab overlay is the one allowed coexister with
 normal highway only. Entering one mode MUST exit the others.
 
 ### IX. Idempotent Side-Effects
-Every wrap of `playSong` / `showScreen` and every event listener
-registration MUST be guarded against re-evaluation. The Split button
-re-injection runs at the end of every `playSong`, but injection
-itself is idempotent.
+Every wrap of `playSong` and every event listener registration
+(including the `screen:changing` listener) MUST be guarded against
+re-evaluation. The Split button re-injection runs at the end of every
+`playSong`, but injection itself is idempotent.
 
 ## Inheritance from Slopsmith Core
 
 Uses `createHighway()`, `panel.hw.setRenderer(factory())` (slopsmith#36),
-the global `<audio>` element, `window.playSong`, `window.showScreen`,
-`#highway`, `#player-controls`, `#player`. The `_onReady` hookup race
+the global `<audio>` element, `window.playSong`, `window.feedBack`
+(for the `screen:changing` event), `#highway`, `#player-controls`,
+`#player`. The `_onReady` hookup race
 (see CLAUDE.md "playSong wrapper") is mitigated with a 6-second
 poll fallback at 200ms intervals.
 
