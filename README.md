@@ -86,6 +86,8 @@ Requirements & caveats:
 - Browsers only keep screens awake on secure pages, so a tablet viewing over plain `http://` may sleep mid-song — tap it awake, or raise the device's screen-timeout for the session.
 - If your machine's LAN IP changes (DHCP), bookmarked URLs go stale — give it a DHCP reservation in your router if that bites.
 
+**Security note:** the LAN share room follows feedBack's overall trusted-network design — the room key controls *discovery*, not authentication. `/ws/sync/{room_key}` is a broadcast room: anyone who joins with the key (not just the host) can send playback/session messages that every other viewer treats as authoritative. This is only a concern if you share your key with, or otherwise expose your server to, people or devices you don't trust on that network — the same trust boundary as every other unauthenticated route in the app. A real fix would need host-issued per-connection tokens in feedBack core, which isn't planned while the app has no broader auth layer (see [splitscreen#24](https://github.com/get-flashbacks/feedBack-plugin-splitscreen/issues/24)).
+
 ## Settings
 
 Open **Settings → Split Screen** to pick the default layout (Top/Bottom, Left/Right, Tri 1+2, Tri 2+1, or Quad). The choice is stored in `localStorage` as `splitscreenLayout` and applies the next time you toggle split screen on.
