@@ -1,6 +1,6 @@
 # Split Screen Plugin — AI Agent Guide
 
-All logic lives in a single IIFE in `screen.js`. There is no build step, no bundler, no imports. The plugin is loaded as a plain `<script>` tag by feedBack core, which means every global it needs (`highway`, `createHighway`, `window.playSong`, `window.showScreen`) must already be on `window` when the script executes.
+All logic lives in a single IIFE in `screen.js`. There is no build step, no bundler, no imports. The plugin is loaded as a plain `<script>` tag by feedBack core, which means every global it needs (`highway`, `createHighway`, `window.playSong`, `window.feedBack`) must already be on `window` when the script executes.
 
 ## Module structure
 
@@ -20,7 +20,7 @@ screen.js
 ├── Time sync                    — startTimeSync, stopTimeSync
 ├── Toolbar buttons              — createLayoutBtn, createHideBtn, createFloatingShowBtn,
 │                                  togglePanelBar, toggleControlsVisibility, updateBtn, injectBtn
-└── Hooks into core              — wraps window.playSong, window.showScreen
+└── Hooks into core              — wraps window.playSong, listens for screen:changing
 ```
 
 ## Constants
