@@ -4737,12 +4737,17 @@ try {
 
     // Clean up on screen change. In follower mode the popup never navigates
     // away from the player, but if something tries we don't tear down split
-    // (the follower panel IS the player).
-    const _show = window.showScreen;
-    window.showScreen = function (id) {
-        if (!FOLLOWER && id !== 'player' && active) stopSplitScreen();
-        _show(id);
-    };
+    // (the follower panel IS the player). Uses core's `screen:changing` event
+    // (fired BEFORE navigation work begins) rather than monkey-patching
+    // window.showScreen — see feedBack#923/#924: core's own navigation calls
+    // its internal showScreen() directly, never window.showScreen, so a
+    // patch here would silently never fire for real navigation.
+    if (window.feedBack) {
+        window.feedBack.on('screen:changing', (e) => {
+            const id = e.detail && e.detail.id;
+            if (!FOLLOWER && id !== 'player' && active) stopSplitScreen();
+        });
+    }
 
     // ══════════════════════════════════════════════════════════════════════
     //  Follower-mode bootstrap (popup window only)
