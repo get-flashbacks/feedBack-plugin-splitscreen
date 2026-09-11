@@ -158,6 +158,19 @@ stopSplitScreen()
   └─ stopTimeSync()
 ```
 
+**`startTimeSync`'s backgrounding exposure is not follower-specific.** Browsers
+clamp/deprioritize `setInterval` in a backgrounded tab, and `startTimeSync` uses
+the same `setInterval` mechanism as `_startPopupBroadcaster` (documented below,
+under "Follower clock", as throttling to ~1 Hz when backgrounded). But
+`startTimeSync` has no rAF-based interpolation fallback the way the follower
+side does (`_startFollowerInterp`) — so if the **main window itself** is
+backgrounded or minimized (e.g. the user has focused a popped-out follower
+window on a second monitor), every in-window panel synced by `startTimeSync`
+degrades to the browser's background-tab interval clamp too, with nothing to
+smooth it over. This is a known, undocumented-until-now gap, not a bug fix
+applied here — a real fix would need the same interpolation machinery the
+follower side already has.
+
 ## Panel render modes
 
 Each panel is always in exactly one of these modes. Flags are mutually exclusive: entering one exits the others.
