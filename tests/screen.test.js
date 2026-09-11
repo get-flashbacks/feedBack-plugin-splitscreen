@@ -403,10 +403,9 @@ test('re-evaluating screen.js installs its global hooks exactly once', () => {
             : null
     );
 
-    // Sentinels — only their identity matters, so the bodies stay empty.
+    // Sentinel — only its identity matters, so the body stays empty.
     const originalPlaySong = async function originalPlaySong() { /* sentinel */ };
     window.playSong = originalPlaySong;
-    window.showScreen = function originalShowScreen() { /* sentinel */ };
 
     loadPlugin();
     assert.notEqual(window.playSong, originalPlaySong, 'first load should wrap playSong');
@@ -419,6 +418,38 @@ test('re-evaluating screen.js installs its global hooks exactly once', () => {
     assert.deepEqual(counts, afterFirst, 'second evaluation must not re-add listeners');
     assert.equal(window.playSong, wrappedOnce, 'second evaluation must not re-wrap playSong');
     assert.equal(settingsWirings, 1, 'second evaluation must not re-wire settings handlers');
+});
+
+// ── screen:changing teardown decision (replaces the old window.showScreen
+// patch — see CLAUDE.md "Hooks into core") ─────────────────────────────────
+
+test('_shouldTeardownOnScreenChange tears down split only when active and leaving the player screen', () => {
+    const mod = freshPlugin();
+    mod._setActiveForTest(true);
+    assert.equal(mod._shouldTeardownOnScreenChange('settings'), true,
+        'navigating away from the player while split is active should tear down');
+    assert.equal(mod._shouldTeardownOnScreenChange('player'), false,
+        'staying on/returning to the player must never tear down');
+});
+
+test('_shouldTeardownOnScreenChange is a no-op when split is inactive', () => {
+    const mod = freshPlugin();
+    mod._setActiveForTest(false);
+    assert.equal(mod._shouldTeardownOnScreenChange('settings'), false);
+});
+
+// ── follower audio.paused shim ──────────────────────────────────────────────
+
+test('_installFollowerAudioShim: audio.paused tracks _followerPlaying, not a hardcoded false', () => {
+    const mod = freshPlugin();
+    const audio = {};
+    mod._installFollowerAudioShim(audio);
+
+    mod._setFollowerPlayingForTest(false);
+    assert.equal(audio.paused, true, 'paused main window should read as paused in the follower');
+
+    mod._setFollowerPlayingForTest(true);
+    assert.equal(audio.paused, false, 'playing main window should read as not-paused in the follower');
 });
 
 // ── LAN share teardown (stopLanShare) ──────────────────────────────────────
