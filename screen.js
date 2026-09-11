@@ -4793,11 +4793,14 @@ try {
                 configurable: true,
             });
             // The element is actually paused (see below — we stop the needless
-            // decode) but anything in the popup that gates animation on
-            // `!audio.paused` should keep running: the follower is conceptually
-            // always following the main playhead.
+            // decode), so `.paused` is shimmed to reflect the main window's
+            // reported play state (`_followerPlaying`) instead of the real
+            // (always-paused) element state — anything in the popup that gates
+            // animation or a play/pause indicator on `!audio.paused` then
+            // correctly freezes/resumes in step with the main window instead of
+            // running unconditionally.
             Object.defineProperty(audio, 'paused', {
-                get() { return false; },
+                get() { return !_followerPlaying; },
                 configurable: true,
             });
         } catch (e) {
@@ -5072,8 +5075,9 @@ try {
         // playing element still decodes the stream for nothing.
         _followerAudio = document.getElementById('audio');
         _silenceFollowerAudio(_followerAudio);
-        // Shim audio.currentTime (→ broadcast time) and audio.paused (→ false)
-        // so the lyrics pane, jumping tab pane, etc. see the broadcast clock
+        // Shim audio.currentTime (→ broadcast time) and audio.paused
+        // (→ !_followerPlaying) so the lyrics pane, jumping tab pane, etc.
+        // see the broadcast clock
         // and keep animating despite the underlying element being paused.
         _installFollowerAudioShim(_followerAudio);
 
