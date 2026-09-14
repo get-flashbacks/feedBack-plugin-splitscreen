@@ -902,8 +902,10 @@ try {
             // sentinel drove was retired when jumpingtab migrated to the
             // setRenderer/viz-factory contract, so any prefs written before
             // that migration are remapped onto the generic viz path, which
-            // reaches the plugin's current `window.feedBackViz_jumpingtab`
-            // factory the same way highway_3d/piano/etc. do.
+            // reaches the plugin via `vizFactory()`, which walks the
+            // `feedBackViz_` then `slopsmithViz_` prefixes (jumpingtab
+            // v3.0.0 still exports only the legacy name) the same way
+            // highway_3d/piano/etc. do.
             if (next.arrName?.startsWith(JUMPING_TAB_VALUE + ':')) {
                 next.arrName = VIZ_PREFIX + ':jumpingtab:' + next.arrName.slice((JUMPING_TAB_VALUE + ':').length);
             }

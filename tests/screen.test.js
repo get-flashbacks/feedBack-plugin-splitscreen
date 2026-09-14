@@ -182,9 +182,11 @@ test('panelToPrefs encodes viz mode with the underlying arrangement name', () =>
 
 // splitscreen#47: window.createJumpingTabPane (and window.createTabView) no
 // longer exist — jumpingtab migrated to the setRenderer/viz-factory contract
-// (window.feedBackViz_jumpingtab) rather than the retired standalone-pane
-// factory, so a panel running it is just an ordinary viz-mode panel now —
-// panelToPrefs never sees a jumpingTabMode field to special-case.
+// (resolved via vizFactory()'s feedBackViz_/slopsmithViz_ prefix walk —
+// jumpingtab v3.0.0 still only exports the legacy slopsmithViz_ name)
+// rather than the retired standalone-pane factory, so a panel running it is
+// just an ordinary viz-mode panel now — panelToPrefs never sees a
+// jumpingTabMode field to special-case.
 test('panelToPrefs encodes a jumpingtab panel via the generic viz path, not a jumping-tab sentinel', () => {
     const mod = freshPlugin();
     mod._setArrangementsForTest([{ name: 'Lead' }]);
