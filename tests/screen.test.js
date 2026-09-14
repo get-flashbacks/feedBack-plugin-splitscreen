@@ -108,6 +108,11 @@ test('resolveArrIndex treats special modes as non-arrangements', () => {
     assert.equal(mod.resolveArrIndex(''), -1);
     assert.equal(mod.resolveArrIndex(null), -1);
     assert.equal(mod.resolveArrIndex('__lyrics__'), -1); // LYRICS_VALUE sentinel used at runtime; harmless if it isn't this literal
+    assert.equal(mod.resolveArrIndex('__viz__:jumpingtab:Lead'), -1);
+    // splitscreen#47: the retired __jumping_tab__ sentinel is no longer
+    // special-cased here (migratePanelPrefs rewrites it before it can reach
+    // resolveArrIndex) — it just falls through to no name match, same -1.
+    assert.equal(mod.resolveArrIndex('__jumping_tab__:0'), -1);
 });
 
 test('getDefaultArrangements prioritizes lead/rhythm/bass then fills and wraps', () => {
@@ -175,6 +180,23 @@ test('panelToPrefs encodes viz mode with the underlying arrangement name', () =>
     assert.equal(prefs.arrName, '__viz__:highway_3d:Bass');
 });
 
+// splitscreen#47: window.createJumpingTabPane (and window.createTabView) no
+// longer exist — jumpingtab migrated to the setRenderer/viz-factory contract
+// (window.feedBackViz_jumpingtab) rather than the retired standalone-pane
+// factory, so a panel running it is just an ordinary viz-mode panel now —
+// panelToPrefs never sees a jumpingTabMode field to special-case.
+test('panelToPrefs encodes a jumpingtab panel via the generic viz path, not a jumping-tab sentinel', () => {
+    const mod = freshPlugin();
+    mod._setArrangementsForTest([{ name: 'Lead' }]);
+    const panel = {
+        arrIndex: 0, vizMode: 'jumpingtab',
+        hw: { getInverted: () => false, getLefty: () => false, getMastery: () => 0 },
+        bar: { style: { display: '' } },
+    };
+    const prefs = mod.panelToPrefs(panel);
+    assert.equal(prefs.arrName, '__viz__:jumpingtab:Lead');
+});
+
 test('migratePanelPrefs passes through non-array input unchanged', () => {
     const { migratePanelPrefs } = freshPlugin();
     assert.equal(migratePanelPrefs(null), null);
@@ -192,6 +214,22 @@ test('migratePanelPrefs migrates the legacy 3D-highway sentinel prefix', () => {
     const { migratePanelPrefs } = freshPlugin();
     const out = migratePanelPrefs([{ arrName: '__3d_highway__:Lead', lyrics: false }]);
     assert.equal(out[0].arrName, '__viz__:highway_3d:Lead');
+});
+
+// splitscreen#47: __jumping_tab__:<arr> drove the retired
+// window.createJumpingTabPane standalone-pane factory. jumpingtab migrated
+// to the setRenderer/viz-factory contract, so old prefs land on the generic
+// viz path instead — the same __viz__:<id>:<arr> shape highway_3d/piano use.
+test('migratePanelPrefs migrates the legacy jumping-tab sentinel onto the generic viz path', () => {
+    const { migratePanelPrefs } = freshPlugin();
+    const out = migratePanelPrefs([{ arrName: '__jumping_tab__:Lead', lyrics: false }]);
+    assert.equal(out[0].arrName, '__viz__:jumpingtab:Lead');
+});
+
+test('migratePanelPrefs leaves an already-migrated viz arrName untouched', () => {
+    const { migratePanelPrefs } = freshPlugin();
+    const out = migratePanelPrefs([{ arrName: '__viz__:jumpingtab:Lead', lyrics: false }]);
+    assert.equal(out[0].arrName, '__viz__:jumpingtab:Lead');
 });
 
 test('migratePanelPrefs does not reset lyrics once already migrated to v2', () => {

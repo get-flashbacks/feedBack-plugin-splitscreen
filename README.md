@@ -165,7 +165,9 @@ See the [CLAUDE.md plugin guide](https://github.com/got-feedback/feedBack/blob/m
 
 ### Path 2: Pane plugins (own canvas + own WebSocket)
 
-If your plugin needs a fundamentally different rendering approach — its own canvas, its own WebSocket connection, DOM elements that aren't a highway at all — use the pane factory contract. Lyrics and Jumping Tab use this path.
+If your plugin needs a fundamentally different rendering approach — its own canvas, its own WebSocket connection, DOM elements that aren't a highway at all — use the pane factory contract. Split screen's own Lyrics pane uses this path.
+
+Prefer Path 1 if you possibly can. Jumping Tab and Tab View originally shipped as pane plugins (`window.createJumpingTabPane` / `window.createTabView`) and both later migrated to the viz-factory contract instead, at which point split screen's pane-specific integration code for them became dead weight — see [feedback-plugin-splitscreen#47](https://github.com/get-flashbacks/feedBack-plugin-splitscreen/issues/47). A pane integration means someone has to maintain matching glue code in split screen's `screen.js` for the life of your plugin; a viz-factory plugin needs none.
 
 Your factory must accept `{ container }` and return `{ connect(), destroy(), resize() }`:
 
@@ -215,7 +217,7 @@ window.createMyVisualization = function ({ container }) {
 
 | Rule | Why |
 |------|-----|
-| **No shared mutable state** | Split screen may create 2–4 instances simultaneously. Each needs its own canvas, WebSocket, RAF handle, and state. If your plugin uses module-level variables, use a context-swap pattern (see Jumping Tab) or refactor to closures. |
+| **No shared mutable state** | Split screen may create 2–4 instances simultaneously. Each needs its own canvas, WebSocket, RAF handle, and state. Refactor module-level variables into closures — everything lives inside the factory call, like `createLyricsPane()` does. |
 | **Decode the filename** | `currentFilename` always arrives percent-encoded (every caller — the grid, v3's `songs.js`, `player.start()` — encodes it before calling `playSong`). Call `decodeURIComponent(filename)` before building the WebSocket URL to avoid double-encoding slashes. |
 | **Sync to `<audio>` directly** | Read `document.getElementById('audio').currentTime` in your RAF loop. The `setTime()` call from split screen's time sync loop is for highway instances only. |
 | **Clean up completely in `destroy()`** | Cancel RAF, close WebSocket, remove any DOM nodes you added inside the container. Split screen removes the container div itself. |
@@ -243,14 +245,13 @@ if (typeof window.createMyVisualization === 'function') {
 }
 ```
 
-**3.** Add `enterMyVizMode(panel)` / `exitMyVizMode(panel, arrIndex)` functions following the lyrics or jumping tab pattern.
+**3.** Add `enterMyVizMode(panel)` / `exitMyVizMode(panel, arrIndex)` functions following the lyrics pattern (`enterLyricsMode`/`exitLyricsMode` in [screen.js](screen.js)).
 
 **4.** Wire into `select.onchange`, `initPanel()`, `teardownPanels()`, `savePanelPrefs()`, `captureCurrentPrefs()`, `sizeCanvases()`, and `startTimeSync()`.
 
 #### Reference implementations
 
-- **Lyrics pane** — `createLyricsPane()` in [screen.js](screen.js). DOM-based renderer, single WebSocket, RAF loop for karaoke highlighting.
-- **Jumping Tab pane** — `window.createJumpingTabPane()` in the [Jumping Tab plugin](https://github.com/renanboni/slopsmith-plugin-jumpingtab). Canvas renderer with context-swapping to share draw functions across multiple pane instances.
+- **Lyrics pane** — `createLyricsPane()` in [screen.js](screen.js). DOM-based renderer, single WebSocket, RAF loop for karaoke highlighting. The only pane plugin split screen still integrates against directly.
 
 ### Per-panel identity & names (for panel-targeting plugins)
 

@@ -14,7 +14,7 @@ screen.js
 ├── createLyricsPane()           — self-contained lyrics renderer
 ├── Layout builders              — createWrap, applyLayoutStyle, createPanel, sizeCanvases
 ├── Panel lifecycle              — populateSelect, initPanel, enter*/exit* mode functions
-├── Panel interactions           — togglePanelTab, toggleDetect, cycleDetectChannel, switchPanelArrangement
+├── Panel interactions           — toggleDetect, cycleDetectChannel, switchPanelArrangement
 ├── Teardown / rebuild           — teardownPanels, rebuildLayout, captureCurrentPrefs
 ├── Start / stop                 — startSplitScreen, stopSplitScreen, toggle
 ├── Time sync                    — startTimeSync, stopTimeSync
@@ -32,7 +32,7 @@ screen.js
 | `ON_CLASS` | Tailwind string | Active button style (used for Split btn) |
 | `STORAGE_KEY` | `'splitscreenPanelPrefs'` | Per-panel prefs in localStorage |
 | `LYRICS_VALUE` | `'__lyrics__'` | Sentinel for lyrics-only pane in dropdown/prefs |
-| `JUMPING_TAB_VALUE` | `'__jumping_tab__'` | Sentinel for jumping tab pane |
+| `JUMPING_TAB_VALUE` | `'__jumping_tab__'` | **Retired** (splitscreen#47) — no live code path produces this anymore; kept only so `migratePanelPrefs()` can recognize and rewrite pre-migration prefs onto the generic viz path below |
 | `VIZ_PREFIX` | `'__viz__'` | Prefix for generic viz-plugin entries. Select value: `__viz__:<pluginId>:<arrIndex>`; saved pref: `__viz__:<pluginId>:<arrName>` |
 | `DETECT_CHANNEL_CYCLE` | `['mono','left','right']` | Channel cycle order |
 | `DETECT_CHANNEL_LABELS` | `{mono:'M',left:'L',right:'R'}` | Channel button labels |
@@ -73,7 +73,7 @@ screen.js
 
 ```js
 {
-  arrName: string,       // arrangement name, or LYRICS_VALUE / JUMPING_TAB_VALUE:arrName / VIZ_PREFIX:pluginId:arrName
+  arrName: string,       // arrangement name, or LYRICS_VALUE / VIZ_PREFIX:pluginId:arrName
   lyrics: bool,          // per-panel lyrics overlay toggle (top-anchored translucent band; works in any renderer)
   inverted: bool,        // panel invert state
   lefty: bool,           // panel left-handed-mode state (hw.getLefty/setLefty)
@@ -85,7 +85,7 @@ screen.js
 
 `lyrics` previously tracked the highway's built-in `setLyricsVisible()` (defaulted to true). The semantic switched in PR #36 to drive the panel-owned lyrics overlay (a translucent band layered above whatever renderer owns the canvas). `migratePanelPrefs` force-resets it to `false` once on first read of pre-PR-36 prefs (gated by `splitscreenPrefsMigrationV` localStorage key) so existing users don't inherit overlay-on everywhere.
 
-Old `__3d_highway__:arrName` entries from pre-Wave C builds are migrated to `__viz__:highway_3d:arrName` on read by `migratePanelPrefs()`.
+Old `__3d_highway__:arrName` entries from pre-Wave C builds are migrated to `__viz__:highway_3d:arrName` on read by `migratePanelPrefs()`. Same for old `__jumping_tab__:arrName` entries (splitscreen#47) — migrated to `__viz__:jumpingtab:arrName` since jumpingtab retired its standalone-pane factory for the generic viz-factory contract; see "Panel render modes" below.
 
 ## Panel object shape
 
@@ -106,8 +106,6 @@ Each entry in `panels[]` is built with `Object.assign({ hw, arrIndex: 0 }, parts
   updateLeftyStyle,  // fn(bool) — updates leftyBtn appearance
   lyricsBtn,         // Lyrics toggle button
   updateLyricsStyle, // fn(bool)
-  tabBtn,            // Tab toggle button
-  updateTabStyle,    // fn(bool)
   detectBtn,         // Detect toggle button
   updateDetectStyle, // fn(bool)
   channelBtn,        // M/L/R channel button
@@ -122,13 +120,7 @@ Each entry in `panels[]` is built with `Object.assign({ hw, arrIndex: 0 }, parts
   arrIndex,          // current arrangement index (integer)
   lyricsMode,        // bool — showing lyrics pane
   lyricsPane,        // { el, connect, destroy } | null
-  jumpingTabMode,    // bool — showing jumping tab pane
-  jumpingTabPane,    // pane object from createJumpingTabPane | null
-  jumpingTabContainer, // the container div for the JT pane | null
-  vizMode,           // string|null — plugin id of active viz renderer (e.g. 'highway_3d'), or null
-  tabActive,         // bool — tab view overlay shown
-  tabInstance,       // createTabView instance | null
-  tabContainer,      // the container div for the tab view | null
+  vizMode,           // string|null — plugin id of active viz renderer (e.g. 'highway_3d', 'jumpingtab'), or null
   detectChannel,     // 'mono' | 'left' | 'right'
   detector,          // createNoteDetector instance | null
 }
@@ -176,22 +168,15 @@ follower side already has.
 Each panel is always in exactly one of these modes. Flags are mutually exclusive: entering one exits the others.
 
 ### Normal highway (default)
-- `lyricsMode=false`, `jumpingTabMode=false`, `vizMode=null`
+- `lyricsMode=false`, `vizMode=null`
 - `canvas` is visible, highway runs its default 2D renderer
 - `hw.connect(wsUrl, { onSongInfo: () => {} })` — empty `onSongInfo` prevents clobbering the main player's HUD
 
 ### Lyrics pane (`lyricsMode=true`)
 - Highway stopped (`hw.stop()`), `canvas` hidden
 - `lyricsPane = createLyricsPane(panelDiv)` — self-contained div with its own WebSocket and rAF loop
-- Invert / Lyrics / Tab buttons hidden while in this mode
+- Invert / Lyrics buttons hidden while in this mode
 - `lyricsPane.connect(filename, 0)` opens WS, listens only for `lyrics` messages
-
-### Jumping Tab pane (`jumpingTabMode=true`)
-- Highway stopped, `canvas` hidden
-- `jumpingTabContainer` div appended to `panelDiv`
-- `pane = window.createJumpingTabPane({ container })` — external plugin factory
-- `pane.connect(filename, arrIndex)` — async, wrapped in try/catch
-- Invert / Lyrics / Tab buttons hidden
 
 ### Viz renderer (`vizMode = pluginId string`)
 - Highway NOT stopped — it stays alive with its WebSocket and rAF loop
@@ -201,15 +186,10 @@ Each panel is always in exactly one of these modes. Flags are mutually exclusive
   order and returns the first hit — current and legacy viz plugins both resolve.
   `hasVizFactory(id)` is the boolean form used for capability checks.
 - `canvas` stays visible (renderer draws to it)
-- Tab button hidden. A **"3D ⚙"** button (`vizSettingsBtn`) is shown if the viz plugin has per-panel controls (see "Per-panel viz controls" below); it opens `vizPopover` with those controls scoped to this panel. Other viz config still lives in the plugin's global settings UI.
+- A **"3D ⚙"** button (`vizSettingsBtn`) is shown if the viz plugin has per-panel controls (see "Per-panel viz controls" below); it opens `vizPopover` with those controls scoped to this panel. Other viz config still lives in the plugin's global settings UI.
 - To exit: `recreatePanelHighway(panel)` discards the viz highway and installs a fresh 2D highway; `_hideVizControls(panel)` hides the button/popover
 - **Canvas context-type lock:** the first `getContext('2d')` or `getContext('webgl')` call on a canvas locks it for its lifetime. Swapping renderers mid-session on the same canvas (e.g. 2D → WebGL → 2D) may not work without re-creating the canvas. The restore-on-load path is safe because `initPanel()` calls `panel.hw.setRenderer(factory())` **before** `hw.init(canvas)` when a viz pref is detected — so the canvas is initialised with the correct context type from the start. For mid-session 2D ↔ viz swaps (and viz-to-viz arrangement switches), `recreatePanelHighway(panel)` is called first to discard the previous highway instance before the new renderer takes over.
-
-### Tab overlay (`tabActive=true`)
-- Can coexist with normal highway mode (not with lyrics/JT/3D modes)
-- `tabContainer` appended over the canvas (`z-index:2`)
-- `createTabView({ container, getBeats, getCurrentTime })` — external plugin
-- Canvas hidden while tab is active
+- `jumpingtab` and `tabview` (Jumping Tab / Tab View) are ordinary entries on this path (splitscreen#47) — both migrated from a standalone-pane factory (`window.createJumpingTabPane` / `window.createTabView`, each with its own splitscreen-side sentinel and lifecycle functions) to the setRenderer/viz-factory contract, and are now selected and torn down exactly like `highway_3d`/`piano`, with no plugin-specific code left in this file. This is also a real (upstream-forced) UX change for Tab View specifically: it used to be a toggleable *overlay* that coexisted with whatever highway/viz was already showing; as a viz-factory renderer it now *replaces* the panel's renderer like any other viz pick, since tabview no longer exports anything that can overlay a live highway.
 
 ## Per-panel viz controls (the "3D ⚙" popover)
 
@@ -217,7 +197,7 @@ When a panel is in viz mode, splitscreen shows a `vizSettingsBtn` ("3D ⚙") tha
 
 - **Descriptor lookup** — `getPanelControlsFor(pluginId)` returns `null` for any plugin other than `highway_3d` (v1 — `_vizPanelGet`/`_vizPanelSet` are hard-wired to highway_3d's storage scheme + `window.h3dBgSet*` setters); for `highway_3d` it returns `vizFactory('highway_3d').panelControls` if exposed, else the built-in `VIZ_PANEL_CONTROLS.highway_3d` (`palette`, `cameraSmoothing`, `cameraLockLow`, `cameraLockZoom`). The viz-plugin-published list wins, so the plugin can keep the *list of controls* current without splitscreen edits — generalizing to other plugins later means extending the descriptor with per-plugin storage/setter info (or read/write fns) and dropping the gate. Each descriptor entry: `{ key, label, type:'toggle'|'range'|'select', default, min?, max?, step?, options? }` where `options` for `select` is `[{id,label}]`; for `range`, `min`/`max` default to `0`/`1` and `step` to `0.05` when omitted (`_ctlRange`). A plugin-published **empty array** is a valid override — it opts out of per-panel controls (`_showVizControls` hides the button on an empty list).
 - **Storage** — per-panel values are written to the viz plugin's own per-panel keys, **not** `splitscreenPanelPrefs`. For `highway_3d`: `localStorage['h3d_bg_panel<N>_<key>']` (read by the plugin's `_bgReadSetting`, falling back to the global `h3d_bg_<key>`). `_vizPanelGet` / `_vizPanelSet` implement this; `_vizPanelSet` also re-fires `window.h3dBgSet<Key>(<currentGlobal>)` so the plugin's change event runs (instant rebuild for settings like `palette`; the 3D renderer also re-reads everything per frame, so even without the re-fire the panel key takes effect next frame). On reload, `enterVizMode` → `_showVizControls` → `buildVizPopover` re-reads the keys, so the popover reflects the saved per-panel state. The keys are never cleared on exit — `_hideVizControls` only hides the popover/button — so they persist indefinitely, **namespaced by panel slot** (`panel<N>`) rather than by session or song. They're inert only for a panel that never runs 3D again: if panel N later re-enables 3D viz (next session, next song, months later), it silently inherits whatever overrides were left in that slot. That per-slot persistence mirrors the original `h3d_bg_*` palette behavior and the rest of the panel prefs; to start a slot fresh, delete its `h3d_bg_panel<N>_*` keys from localStorage by hand.
-- **Lifecycle** — `_showVizControls(panel, pluginId)` (builds the popover + shows the button) is called at the end of `enterVizMode` and the in-place viz-switch branch of `panel.select.onchange`. `_hideVizControls(panel)` (hides + empties) is called from `exitVizMode`, `enterLyricsMode`, `enterJumpingTabMode`. `togglePanelBar` closes the popover when hiding the bar (it's anchored to the bar height). A document-level capture `pointerdown` listener (`_closeAllVizPopovers`) closes any open popover on a click outside `.ss-viz-popover` / `[data-ss-viz-btn]`. The `vizSettingsBtn` click handler **rebuilds the popover from current localStorage every time it opens** — `_closeAllVizPopovers` / the outside-click handler only hide (don't empty), so the rebuild-on-open is the single point that guarantees the controls reflect any `h3d_bg_*` changes (e.g. via the plugin's own settings UI) made while the popover was closed.
+- **Lifecycle** — `_showVizControls(panel, pluginId)` (builds the popover + shows the button) is called at the end of `enterVizMode` and the in-place viz-switch branch of `panel.select.onchange`. `_hideVizControls(panel)` (hides + empties) is called from `exitVizMode` and `enterLyricsMode`. `togglePanelBar` closes the popover when hiding the bar (it's anchored to the bar height). A document-level capture `pointerdown` listener (`_closeAllVizPopovers`) closes any open popover on a click outside `.ss-viz-popover` / `[data-ss-viz-btn]`. The `vizSettingsBtn` click handler **rebuilds the popover from current localStorage every time it opens** — `_closeAllVizPopovers` / the outside-click handler only hide (don't empty), so the rebuild-on-open is the single point that guarantees the controls reflect any `h3d_bg_*` changes (e.g. via the plugin's own settings UI) made while the popover was closed.
 - **Note for new viz plugins** that want per-panel controls: expose `window.feedBackViz_<id>.panelControls = [...]` and use the `*_panel<N>_*` localStorage convention the plugin already reads (or, if it uses a different scheme, the descriptor would need to carry `read`/`write` fns — not implemented in v1; only `highway_3d` is wired).
 
 ## `sizeCanvases()` — call it whenever layout space changes
@@ -226,8 +206,7 @@ When a panel is in viz mode, splitscreen shows a `vizSettingsBtn` ("3D ⚙") tha
 function sizeCanvases() {
   wrap.style.bottom = controls.offsetHeight + 'px'; // respects hidden controls
   for (const p of panels) {
-    if (p.jumpingTabMode && p.jumpingTabPane) p.jumpingTabPane.resize();
-    else if (!p.lyricsMode) p.hw.resize();
+    if (!p.lyricsMode) p.hw.resize();
   }
 }
 ```
@@ -253,7 +232,7 @@ Two independent levels:
 
 **Per-panel mini bar** (`panel.bar`)
 - `barToggleBtn`: `position:absolute; bottom:0; right:0; z-index:8` — always on top of the bar
-- `togglePanelBar(panel)`: toggles `bar.style.display`, updates button text/style, calls `hw.resize()` or `jumpingTabPane.resize()`, calls `savePanelPrefs()`
+- `togglePanelBar(panel)`: toggles `bar.style.display`, updates button text/style, calls `hw.resize()`, calls `savePanelPrefs()`
 - State persisted in `barHidden` field of `splitscreenPanelPrefs`
 - Restored in `startSplitScreen()` by calling `togglePanelBar(panel)` if `panelPrefs.barHidden`
 
@@ -272,7 +251,7 @@ A panel can be detached into its own browser window (`⇱ Pop`) for multi-monito
 | `{type:'docked', popupId, finalState}` | popup → main | User clicked Dock (or closed the window after clicking it). Main re-docks the panel. |
 | `{type:'closed', popupId}` | popup → main | Popup unloading without a Dock click (`beforeunload`). Main drops the `popups` entry; the panel is *not* re-added. |
 
-**Follower clock.** The popup's `<audio>` is muted **and paused** (`_silenceFollowerAudio` — a muted-but-playing element still decodes for nothing; a `'play'` listener re-pauses it after any autoplay/src-swap). `audio.currentTime` is shimmed to `_followerCurrentTime`, and `audio.paused` is shimmed to `!_followerPlaying` (not a hardcoded `false`) so the lyrics/jumping-tab panes (which read `audio.currentTime` and gate animation on `!audio.paused`) — and any other code that reads `.paused` as a play/pause indicator — correctly track the main window's actual play state instead of running unconditionally. Between `time` broadcasts, `_startFollowerInterp()`'s rAF loop extrapolates `_followerCurrentTime` forward (`anchorT + observedRate·Δperf`) while `_followerPlaying` — so scrolling stays smooth even when the main tab is backgrounded and its broadcaster throttles to ~1 Hz. `observedRate` is derived from message Δt/Δwall (tracks the speed slider); out-of-band deltas (seek, loop wrap, long gap) reset it to 1 and the popup snaps to the broadcast value. Extrapolation is capped at `_FOLLOWER_MAX_EXTRAP_S` (2 s) past the last message as a backstop for a dropped `playstate:false`.
+**Follower clock.** The popup's `<audio>` is muted **and paused** (`_silenceFollowerAudio` — a muted-but-playing element still decodes for nothing; a `'play'` listener re-pauses it after any autoplay/src-swap). `audio.currentTime` is shimmed to `_followerCurrentTime`, and `audio.paused` is shimmed to `!_followerPlaying` (not a hardcoded `false`) so the lyrics pane (which reads `audio.currentTime` and gates animation on `!audio.paused`) — and any other code that reads `.paused` as a play/pause indicator — correctly track the main window's actual play state instead of running unconditionally. Between `time` broadcasts, `_startFollowerInterp()`'s rAF loop extrapolates `_followerCurrentTime` forward (`anchorT + observedRate·Δperf`) while `_followerPlaying` — so scrolling stays smooth even when the main tab is backgrounded and its broadcaster throttles to ~1 Hz. `observedRate` is derived from message Δt/Δwall (tracks the speed slider); out-of-band deltas (seek, loop wrap, long gap) reset it to 1 and the popup snaps to the broadcast value. Extrapolation is capped at `_FOLLOWER_MAX_EXTRAP_S` (2 s) past the last message as a backstop for a dropped `playstate:false`.
 
 **Single-flight.** `_handleFollowerSongChange` is single-flight (`_followerRebuildBusy`): a song change arriving mid-rebuild is coalesced into `_followerPendingFilename` and the latest one runs after the current rebuild finishes — so rapid song skips in the main window don't spawn overlapping `playSong`/`buildFollowerLayout` runs in the popup. `rebuildFollowerLayout` (the layout `<select>`) bails and re-syncs the picker if a song-change rebuild is in flight. On the main side, `_redockPanel` defers (`_pendingRedocks`, drained in `startSplitScreen`'s `finally`, same pattern as `_pendingRebuild`) when a start is in flight, so a `docked` message landing during the post-pop-out rebuild doesn't tear down the half-built layout.
 
@@ -317,8 +296,6 @@ The plugin wraps `window.playSong` to:
       .ss-viz-popover   — position:absolute, right:4px, bottom:{barH+4}px, z-index:9 (viz mode; display:none unless opened)
       .barToggleBtn     — position:absolute, bottom:0, right:0, z-index:8
       [lyricsPane div]  — position:absolute, inset:0, bottom:{barH}px (lyrics mode)
-      [jtContainer div] — position:absolute, inset:0, bottom:{barH}px (jumping tab mode)
-      [tabContainer]    — position:absolute, inset:0, bottom:{barH}px, z-index:2 (tab overlay)
   #player-controls      — position:relative, z-index:10, margin-top:auto (while splitscreen active)
   [floatBtn]            — position:absolute, bottom:8px, right:8px, z-index:20 (when bar hidden)
 ```
@@ -339,16 +316,29 @@ The plugin capability-checks all external factories at runtime and gracefully di
 
 | Factory | Checked via | Used in |
 |---|---|---|
-| `window.createJumpingTabPane` | `typeof === 'function'` | `populateSelect()`, `enterJumpingTabMode()` |
-| `window['feedBackViz_' + id]` (legacy `slopsmithViz_` fallback) | resolved via `fetchVizPlugins()` | `populateSelect()`, `enterVizMode()` — auto-discovered for any `type=visualization` plugin |
-| `window.createTabView` | `typeof === 'function'` | `initPanel()` (wires tabBtn) |
+| `window['feedBackViz_' + id]` (legacy `slopsmithViz_` fallback) | resolved via `fetchVizPlugins()` | `populateSelect()`, `enterVizMode()` — auto-discovered for any `type=visualization` plugin, including `jumpingtab`/`tabview` (splitscreen#47) |
 | `window.createNoteDetector` | `typeof === 'function'` | `initPanel()` (wires detectBtn/channelBtn) |
+
+Retired (splitscreen#47): `window.createJumpingTabPane` and `window.createTabView` — both plugins dropped their standalone-pane factories for the viz-factory contract above, so nothing in this file feature-detects them anymore.
 
 The `{ onSongInfo: () => {} }` passed to `hw.connect()` suppresses the default behavior where receiving `song_info` would overwrite the main player's HUD, audio element, and arrangement dropdown. This is required for every panel WebSocket connection. See slopsmith issue #27.
 
 ## Adding a new panel mode
 
-Follow the lyrics/jumping-tab pattern:
+Only reach for a hand-rolled sentinel (like `LYRICS_VALUE`) when the mode manages
+its own non-highway DOM and lifecycle outside the setRenderer contract — the way
+`enterLyricsMode`/`exitLyricsMode` do. If your plugin can instead expose a
+`window.feedBackViz_<id>` factory (see feedBack core's setRenderer contract),
+do that: it gets picked up automatically by `fetchVizPlugins()`/`populateSelect()`
+with zero splitscreen-side code, the same way `highway_3d`, `piano`,
+`jumpingtab`, and `tabview` already are. splitscreen#47 removed two
+sentinel-based integrations (`JUMPING_TAB_VALUE`, plus a `tabBtn` overlay
+toggle for Tab View) precisely because their plugins later gained
+`setRenderer` factories, making the sentinel path pure redundant surface
+area — don't reintroduce that pattern unless the mode genuinely can't be a
+viz-factory renderer.
+
+Follow the lyrics pattern for a genuine standalone-pane mode:
 1. Add a sentinel constant (e.g. `const MY_MODE_VALUE = '__my_mode__'`)
 2. Add a factory check in `populateSelect()` and push options with the sentinel as value prefix
 3. Write `enterMyMode(panel)` and `exitMyMode(panel, arrIndex)` — mirror the existing enter/exit pairs: hide/show appropriate buttons, manage your DOM nodes and lifecycle, call `savePanelPrefs()` at the end
@@ -358,7 +348,7 @@ Follow the lyrics/jumping-tab pattern:
 7. Tear down in `teardownPanels()` — destroy resources and null refs
 8. Add the `arrName` encoding in `savePanelPrefs()` and `captureCurrentPrefs()`
 9. Add pref restoration in `startSplitScreen()` (the block that builds `arrDefaults`)
-10. Update `sizeCanvases()` if your mode needs its own resize path (like jumping tab does)
+10. Update `sizeCanvases()` if your mode needs its own resize path (a live standalone pane usually does, since it isn't a `hw.resize()`-driven canvas)
 
 ## Common pitfalls
 
@@ -367,7 +357,7 @@ Follow the lyrics/jumping-tab pattern:
 - **`sizeCanvases()` uses `controls.offsetHeight`** — when the controls bar is hidden (`display:none`), `offsetHeight` returns 0 and `wrap.style.bottom` becomes `'0px'`, filling the full viewport. This is correct and intentional.
 - **The `onSongInfo: () => {}` empty callback is mandatory** — omitting it causes every panel's WebSocket `song_info` message to overwrite the main player's audio `src`, arrangement dropdown, and HUD.
 - **Plugin load order** — screen.js loads alphabetically. Plugins that wrap `playSong` before splitscreen (alphabetically earlier names) run closer to the original; later-loading plugins run first. This affects the `_onReady` hookup timing.
-- **`currentFilename` is always the percent-encoded form** — never raw. The grid renders `data-play="<encodeURIComponent(localFilename)>"`, v3's `songs.js` calls `playSong(encodeURIComponent(localFilename))`, and `player.start()` normalizes any raw name to encoded before calling `playSong` — so `decodeURIComponent(currentFilename)` never sees an unencoded name or a stray literal `%` (a real filename containing `%` arrives already percent-encoded, same as any other reserved character). `getWsUrl()` decodes internally for highway connections with this invariant documented inline (mirrors core `highway.js`'s own unconditional decode); other call sites (e.g. `togglePanelTab`'s tabview fetch) decode inside a `try`/`catch` that already wraps the whole request, so a violation of the invariant fails safely instead of throwing uncaught.
+- **`currentFilename` is always the percent-encoded form** — never raw. The grid renders `data-play="<encodeURIComponent(localFilename)>"`, v3's `songs.js` calls `playSong(encodeURIComponent(localFilename))`, and `player.start()` normalizes any raw name to encoded before calling `playSong` — so `decodeURIComponent(currentFilename)` never sees an unencoded name or a stray literal `%` (a real filename containing `%` arrives already percent-encoded, same as any other reserved character). `getWsUrl()` decodes internally for highway connections with this invariant documented inline (mirrors core `highway.js`'s own unconditional decode).
 - **`rebuildLayout()` uses `captureCurrentPrefs()`** — this captures the live state of running panels. `savePanelPrefs()` also writes the same data to localStorage. They share the same object shape; `captureCurrentPrefs` just returns the array in memory instead of persisting it.
 
 ## Git and PR conventions
