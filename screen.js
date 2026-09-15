@@ -411,7 +411,7 @@ try {
             if (added) {
                 // Re-populate every live panel's picker so the new viz
                 // options become available. populateSelect honours each
-                // panel's vizMode / lyricsMode / jumpingTabMode + arrIndex,
+                // panel's vizMode / lyricsMode + arrIndex,
                 // so the user's current selection is preserved across the
                 // rebuild.
                 panels.forEach(p => {
@@ -782,18 +782,16 @@ try {
     /**
      * ── Panel preference persistence ──
      * Snapshot a live panel into the splitscreenPanelPrefs entry shape. Mode is
-     * encoded into arrName (LYRICS_VALUE / JUMPING_TAB_VALUE:<arr> /
-     * VIZ_PREFIX:<id>:<arr> / plain arrangement name). Single source of truth
-     * for the encoding — used by savePanelPrefs (persist to localStorage),
-     * captureCurrentPrefs (in-memory, for rebuildLayout / _redockPanel) and
-     * popOutPanel (snapshot of the panels left behind). Keep all three on this
-     * helper so a new per-panel field is added once, not three times.
+     * encoded into arrName (LYRICS_VALUE / VIZ_PREFIX:<id>:<arr> / plain
+     * arrangement name). Single source of truth for the encoding — used by
+     * savePanelPrefs (persist to localStorage), captureCurrentPrefs (in-memory,
+     * for rebuildLayout / _redockPanel) and popOutPanel (snapshot of the panels
+     * left behind). Keep all three on this helper so a new per-panel field is
+     * added once, not three times.
      */
     function panelToPrefs(p) {
         return {
-            arrName: p.jumpingTabMode
-                ? JUMPING_TAB_VALUE + ':' + (arrangements[p.arrIndex]?.name || '')
-                : p.vizMode
+            arrName: p.vizMode
                 ? VIZ_PREFIX + ':' + p.vizMode + ':' + (arrangements[p.arrIndex]?.name || '')
                 : p.lyricsMode ? LYRICS_VALUE : (arrangements[p.arrIndex]?.name || ''),
             lyrics: !!p.lyricsOverlayOn,
@@ -899,6 +897,18 @@ try {
             if (next.arrName?.startsWith('__3d_highway__:')) {
                 next.arrName = VIZ_PREFIX + ':highway_3d:' + next.arrName.slice('__3d_highway__:'.length);
             }
+            // Legacy Jumping Tab sentinel migration (splitscreen#47) — the
+            // standalone-pane factory (window.createJumpingTabPane) this
+            // sentinel drove was retired when jumpingtab migrated to the
+            // setRenderer/viz-factory contract, so any prefs written before
+            // that migration are remapped onto the generic viz path, which
+            // reaches the plugin via `vizFactory()`, which walks the
+            // `feedBackViz_` then `slopsmithViz_` prefixes (jumpingtab
+            // v3.0.0 still exports only the legacy name) the same way
+            // highway_3d/piano/etc. do.
+            if (next.arrName?.startsWith(JUMPING_TAB_VALUE + ':')) {
+                next.arrName = VIZ_PREFIX + ':jumpingtab:' + next.arrName.slice((JUMPING_TAB_VALUE + ':').length);
+            }
             return next;
         });
         if (v < PREFS_CURRENT_V) {
@@ -913,7 +923,7 @@ try {
      * @param {*} arrName
      */
     function resolveArrIndex(arrName) {
-        if (!arrName || arrName === LYRICS_VALUE || arrName.startsWith(JUMPING_TAB_VALUE) || arrName.startsWith(VIZ_PREFIX + ':')) return -1;
+        if (!arrName || arrName === LYRICS_VALUE || arrName.startsWith(VIZ_PREFIX + ':')) return -1;
         const lower = arrName.toLowerCase();
         for (let i = 0; i < arrangements.length; i++) {
             if ((arrangements[i].name || '').toLowerCase() === lower) return i;
@@ -1379,16 +1389,11 @@ try {
 
         // Hidden unless window.createFretboardOverlay is available (the
         // fretboard plugin's per-panel factory export) — same
-        // capability-check pattern as the jumping-tab / viz buttons.
+        // capability-check pattern as the viz picker entries.
         const chordsBtn = makeToggleBtn('Chords');
         const updateChordsStyle = (on) => styleToggle(chordsBtn, on, '#7c2d12');
         chordsBtn.style.display = 'none';
         bar.appendChild(chordsBtn);
-
-        const tabBtn = makeToggleBtn('Tab');
-        const updateTabStyle = (on) => styleToggle(tabBtn, on, '#1e40af');
-        updateTabStyle(false);
-        bar.appendChild(tabBtn);
 
         const detectBtn = makeToggleBtn('Detect');
         const updateDetectStyle = (on) => styleToggle(detectBtn, on, '#14532d');
@@ -1558,7 +1563,6 @@ try {
             leftyBtn, updateLeftyStyle,
             lyricsBtn, updateLyricsStyle,
             chordsBtn, updateChordsStyle,
-            tabBtn, updateTabStyle,
             detectBtn, updateDetectStyle,
             channelBtn, deviceSelect, latWrap, latVal, latDown, latUp,
             vizSettingsBtn, vizPopover,
@@ -1615,16 +1619,12 @@ try {
         // panels up front, then applying every write, costs one layout flush
         // total instead of one per panel.
         const measured = panels.map((p) => (
-            (!p.lyricsMode && !(p.jumpingTabMode && p.jumpingTabPane))
+            !p.lyricsMode
                 ? { rect: p.panelDiv.getBoundingClientRect(), barH: p.bar.style.display === 'none' ? 0 : (p.bar.offsetHeight || 28) }
                 : null
         ));
         panels.forEach((p, i) => {
-            if (p.jumpingTabMode && p.jumpingTabPane) {
-                p.jumpingTabPane.resize();
-            } else if (!p.lyricsMode) {
-                p.hw.resize(measured[i]);
-            }
+            if (!p.lyricsMode) p.hw.resize(measured[i]);
             if (p.chordsOverlay) p.chordsOverlay.resize();
         });
     }
@@ -1924,16 +1924,6 @@ try {
         if (panel.lyricsMode) lyricsOpt.selected = true;
         panel.select.appendChild(lyricsOpt);
 
-        if (typeof window.createJumpingTabPane === 'function') {
-            arrangements.forEach((a, i) => {
-                const jtOpt = document.createElement('option');
-                jtOpt.value = JUMPING_TAB_VALUE + ':' + i;
-                jtOpt.textContent = (a.name || `Arr ${i}`) + ' (JT)';
-                if (panel.jumpingTabMode && panel.arrIndex === i) jtOpt.selected = true;
-                panel.select.appendChild(jtOpt);
-            });
-        }
-
         vizPlugins.filter(vp => hasVizFactory(vp.id)).forEach(vp => {
             arrangements.forEach((a, i) => {
                 const opt = document.createElement('option');
@@ -1961,8 +1951,6 @@ try {
         if (panel.lyricsMode) return;
 
         if (panel.vizMode) exitVizMode(panel, panel.arrIndex);
-        if (panel.jumpingTabMode) exitJumpingTabMode(panel, panel.arrIndex);
-        if (panel.tabActive) togglePanelTab(panel);
         // Detect on/off isn't persisted in prefs (only channel/device/offset
         // are) — it's a purely in-session toggle. With detectBtn about to be
         // hidden the user would have no way to stop a live detector while in
@@ -1979,7 +1967,6 @@ try {
         // of the full lyrics pane, duplicating the text.
         panel.invertBtn.style.display = 'none';
         panel.leftyBtn.style.display = 'none';
-        panel.tabBtn.style.display = 'none';
         panel.lyricsBtn.style.display = 'none';
         panel.chordsBtn.style.display = 'none';
         if (panel.detectBtn) panel.detectBtn.style.display = 'none';
@@ -2031,7 +2018,6 @@ try {
         panel.canvas.style.display = '';
         panel.invertBtn.style.display = '';
         panel.leftyBtn.style.display = '';
-        panel.tabBtn.style.display = '';
         panel.lyricsBtn.style.display = '';
         panel.chordsBtn.style.display = (typeof window.createFretboardOverlay === 'function') ? '' : 'none';
         if (panel.detectBtn) panel.detectBtn.style.display = '';
@@ -2072,125 +2058,6 @@ try {
     }
 
     /**
-     * Enter Jumping Tab Mode.
-     * @param {*} panel
-     */
-    function enterJumpingTabMode(panel) {
-        if (panel.jumpingTabMode) return;
-
-        if (panel.vizMode) exitVizMode(panel, panel.arrIndex);
-        if (panel.lyricsMode) exitLyricsMode(panel, panel.arrIndex);
-        if (panel.tabActive) togglePanelTab(panel);
-        // Detect on/off isn't persisted in prefs (only channel/device/offset
-        // are) — it's a purely in-session toggle. With detectBtn about to be
-        // hidden the user would have no way to stop a live detector while in
-        // this mode, so turn it off (before the highway stops and the button
-        // hides) rather than leave it scoring against an already-stopped
-        // highway with an inaccessible control.
-        if (panel.detector) toggleDetect(panel);
-        panel.hw.stop();
-        panel.canvas.style.display = 'none';
-
-        panel.invertBtn.style.display = 'none';
-        panel.leftyBtn.style.display = 'none';
-        panel.tabBtn.style.display = 'none';
-        panel.lyricsBtn.style.display = 'none';
-        panel.chordsBtn.style.display = 'none';
-        if (panel.detectBtn) panel.detectBtn.style.display = 'none';
-        if (panel.channelBtn) panel.channelBtn.style.display = 'none';
-        panel.masteryHeading.style.display = 'none';
-        panel.masterySlider.style.display = 'none';
-        panel.masteryLabel.style.display = 'none';
-        _hideVizControls(panel);
-        if (panel.lyricsOverlay) {
-            panel.lyricsOverlay.destroy();
-            panel.lyricsOverlay.el.remove();
-            panel.lyricsOverlay = null;
-        }
-        if (panel.chordsOverlay) {
-            panel.chordsOverlay.destroy();
-            panel.chordsOverlay = null;
-        }
-
-        const jtContainer = document.createElement('div');
-        jtContainer.style.cssText =
-            'position:absolute;top:0;left:0;right:0;bottom:' +
-            ((panel.bar.offsetHeight || 28) + 'px') +
-            ';overflow:hidden;background:#0f1420;z-index:2;';
-        panel.panelDiv.appendChild(jtContainer);
-
-        const pane = window.createJumpingTabPane({ container: jtContainer });
-        if (currentFilename) {
-            pane.connect(currentFilename, panel.arrIndex).catch(e => {
-                console.warn('[splitscreen] jumping tab connect failed:', e.message);
-            });
-        }
-        panel.jumpingTabMode = true;
-        panel.jumpingTabPane = pane;
-        panel.jumpingTabContainer = jtContainer;
-        panel.select.value = JUMPING_TAB_VALUE + ':' + panel.arrIndex;
-        panel.arrName.textContent = (arrangements[panel.arrIndex]?.name || '') + ' (JT)';
-        savePanelPrefs();
-    }
-
-    /**
-     * Exit Jumping Tab Mode.
-     * @param {*} panel
-     * @param {*} arrIndex
-     */
-    function exitJumpingTabMode(panel, arrIndex) {
-        if (!panel.jumpingTabMode) return;
-
-        if (panel.jumpingTabPane) {
-            panel.jumpingTabPane.destroy();
-            panel.jumpingTabPane = null;
-        }
-        if (panel.jumpingTabContainer) {
-            panel.jumpingTabContainer.remove();
-            panel.jumpingTabContainer = null;
-        }
-
-        panel.canvas.style.display = '';
-        panel.invertBtn.style.display = '';
-        panel.leftyBtn.style.display = '';
-        panel.tabBtn.style.display = '';
-        panel.lyricsBtn.style.display = '';
-        panel.chordsBtn.style.display = (typeof window.createFretboardOverlay === 'function') ? '' : 'none';
-        if (panel.detectBtn) panel.detectBtn.style.display = '';
-        if (panel.channelBtn) panel.channelBtn.style.display = '';
-        panel.masteryHeading.style.display = '';
-        panel.masterySlider.style.display = '';
-        panel.masteryLabel.style.display = '';
-        panel.jumpingTabMode = false;
-
-        panel.hw.init(panel.canvas);
-        // Force false after every init(), same as recreatePanelHighway —
-        // init() may reset the highway's internal renderer state (including
-        // this flag) back to its true default even on a reused instance.
-        if (typeof panel.hw.setLyricsVisible === 'function') panel.hw.setLyricsVisible(false);
-        panel.hw.resize();
-        panel.arrIndex = arrIndex;
-        panel.arrName.textContent = arrangements[arrIndex]?.name || '';
-        hookPanelReady(panel);
-        panel.hw.connect(getWsUrl(currentFilename, arrIndex), { onSongInfo: () => {} });
-        // Never enable the highway's built-in lyrics flag here — the overlay
-        // is the only lyrics display splitscreen panels use; see
-        // recreatePanelHighway for why.
-        if (panel.lyricsOverlayOn) {
-            panel.lyricsOverlay = createLyricsPane(panel.panelDiv, { overlay: true });
-            panel.lyricsOverlay.connect(currentFilename, 0);
-        }
-        if (panel.chordsOverlayOn && typeof window.createFretboardOverlay === 'function') {
-            panel.chordsOverlay = window.createFretboardOverlay({
-                container: panel.panelDiv,
-                getHighway: () => panel.hw,
-                bottomOffset: () => panel.bar.offsetHeight,
-            });
-        }
-        savePanelPrefs();
-    }
-
-    /**
      * Enter Viz Mode.
      * @param {*} panel
      * @param {*} pluginId
@@ -2200,10 +2067,6 @@ try {
         if (panel.vizMode) return;
 
         if (panel.lyricsMode) exitLyricsMode(panel, panel.arrIndex);
-        if (panel.jumpingTabMode) exitJumpingTabMode(panel, panel.arrIndex);
-        if (panel.tabActive) togglePanelTab(panel);
-
-        panel.tabBtn.style.display = 'none';
 
         // Skip setRenderer when the caller already installed the renderer
         // before hw.init (restore-on-load path) to avoid creating a redundant
@@ -2211,14 +2074,13 @@ try {
         if (!rendererPreInstalled) {
             // Build the renderer instance FIRST so a throwing factory
             // doesn't tear down the highway / canvas before we know it
-            // works. On throw, restore the buttons we just hid and bail
-            // — panel keeps its previous (now-2D-after-exit*) highway.
+            // works. On throw, panel keeps its previous (now-2D-after-exit*)
+            // highway.
             let newRenderer;
             try {
                 newRenderer = vizFactory(pluginId)();
             } catch (e) {
                 console.error('[splitscreen] viz factory threw for', pluginId, '— staying in 2D:', e);
-                panel.tabBtn.style.display = '';
                 return;
             }
             // Recreate the highway with a fresh canvas + the viz renderer
@@ -2270,7 +2132,6 @@ try {
         panel.vizMode = null;
 
         _hideVizControls(panel);
-        panel.tabBtn.style.display = '';
 
         panel.arrIndex = arrIndex;
         panel.arrName.textContent = arrangements[arrIndex]?.name || '';
@@ -2303,14 +2164,9 @@ try {
      */
     function initPanel(panel, arrIndex, prefs) {
         const isLyricsMode = prefs?.arrName === LYRICS_VALUE;
-        const isJumpingTabMode = prefs?.arrName?.startsWith(JUMPING_TAB_VALUE) || false;
         const isVizMode = prefs?.arrName?.startsWith(VIZ_PREFIX + ':') || false;
         let savedVizPluginId = null;
-        if (isJumpingTabMode) {
-            const jtArrName = prefs.arrName.slice(JUMPING_TAB_VALUE.length + 1);
-            const jtIdx = resolveArrIndex(jtArrName);
-            panel.arrIndex = jtIdx >= 0 ? jtIdx : arrIndex;
-        } else if (isVizMode) {
+        if (isVizMode) {
             const parts = prefs.arrName.split(':');
             savedVizPluginId = parts[1];
             const vizArrName = parts.slice(2).join(':');
@@ -2325,9 +2181,6 @@ try {
         panel.lyricsOverlayOn = false;
         panel.chordsOverlay = null;
         panel.chordsOverlayOn = false;
-        panel.jumpingTabMode = false;
-        panel.jumpingTabPane = null;
-        panel.jumpingTabContainer = null;
         panel.vizMode = null;
 
         // For viz restore: install the renderer BEFORE hw.init so the canvas
@@ -2357,7 +2210,7 @@ try {
         // _toggleLyricsOverlay, which is the sole source of truth for
         // splitscreen's lyrics display — never set the highway's built-in
         // lyrics flag from prefs here.
-        if (prefs && !isLyricsMode && !isJumpingTabMode) {
+        if (prefs && !isLyricsMode) {
             if (prefs.inverted !== undefined) panel.hw.setInverted(prefs.inverted);
             if (prefs.lefty !== undefined) panel.hw.setLefty(prefs.lefty);
         }
@@ -2412,24 +2265,12 @@ try {
         populateSelect(panel, panel.arrIndex);
 
         panel.arrName.textContent = isLyricsMode ? 'Lyrics'
-            : isJumpingTabMode ? 'Jumping Tab'
             : (isVizMode && vizInstalled) ? (arrangements[panel.arrIndex]?.name || '') + ' (viz)'
             : (arrangements[panel.arrIndex]?.name || '');
 
         panel.select.onchange = () => {
             const val = panel.select.value;
-            if (val.startsWith(JUMPING_TAB_VALUE + ':')) {
-                const jtIdx = parseInt(val.split(':')[1]);
-                panel.arrIndex = jtIdx;
-                if (panel.jumpingTabMode) {
-                    panel.jumpingTabPane.destroy();
-                    panel.jumpingTabPane = null;
-                    panel.jumpingTabContainer.remove();
-                    panel.jumpingTabContainer = null;
-                    panel.jumpingTabMode = false;
-                }
-                enterJumpingTabMode(panel);
-            } else if (val.startsWith(VIZ_PREFIX + ':')) {
+            if (val.startsWith(VIZ_PREFIX + ':')) {
                 const parts    = val.split(':');
                 const pluginId = parts[1];
                 const vizIdx   = parseInt(parts[2]);
@@ -2483,9 +2324,7 @@ try {
                 enterLyricsMode(panel);
             } else {
                 const newIdx = parseInt(val);
-                if (panel.jumpingTabMode) {
-                    exitJumpingTabMode(panel, newIdx);
-                } else if (panel.vizMode) {
+                if (panel.vizMode) {
                     exitVizMode(panel, newIdx);
                 } else if (panel.lyricsMode) {
                     exitLyricsMode(panel, newIdx);
@@ -2592,16 +2431,6 @@ try {
             };
         }
 
-        // Per-panel Highway/Tab mode toggle (uses tabview factory)
-        const hasTabFactory = typeof window.createTabView === 'function';
-        if (hasTabFactory) {
-            panel.tabBtn.onclick = () => togglePanelTab(panel);
-        } else {
-            panel.tabBtn.disabled = true;
-            panel.tabBtn.title = 'Tab View plugin not loaded';
-            panel.tabBtn.style.opacity = '0.4';
-        }
-
         // Per-panel note detection (uses note_detect factory)
         panel.detectChannel = prefs?.detectChannel || 'mono';
         // Clamp a saved channel that's no longer offered (e.g. a deferred-multichannel
@@ -2639,8 +2468,6 @@ try {
 
         if (isLyricsMode) {
             enterLyricsMode(panel);
-        } else if (isJumpingTabMode) {
-            enterJumpingTabMode(panel);
         } else if (isVizMode && vizInstalled) {
             // Renderer was already installed before hw.init above; pass true to
             // skip the redundant setRenderer call inside enterVizMode. If the
@@ -2654,69 +2481,6 @@ try {
             // See got-feedback/feedBack#27.
             hookPanelReady(panel);
             panel.hw.connect(getWsUrl(currentFilename, arrIndex), { onSongInfo: () => {} });
-        }
-    }
-
-    /**
-     * Toggle Panel Tab.
-     * @param {*} panel
-     */
-    async function togglePanelTab(panel) {
-        if (panel.tabActive) {
-            // Back to highway
-            if (panel.tabInstance) {
-                try { panel.tabInstance.destroy(); } catch (_) {}
-                panel.tabInstance = null;
-            }
-            if (panel.tabContainer) {
-                panel.tabContainer.remove();
-                panel.tabContainer = null;
-            }
-            panel.canvas.style.display = '';
-            panel.tabActive = false;
-            panel.updateTabStyle(false);
-            return;
-        }
-
-        const prevLabel = panel.tabBtn.textContent;
-        panel.tabBtn.textContent = '…';
-        panel.tabBtn.disabled = true;
-        try {
-            const decoded = decodeURIComponent(currentFilename);
-            const serverIndex = arrangements[panel.arrIndex]?.index ?? panel.arrIndex;
-            const url = '/api/plugins/tabview/gp5/' +
-                encodeURIComponent(decoded) +
-                '?arrangement=' + serverIndex;
-            const resp = await fetch(url);
-            if (!resp.ok) throw new Error(await resp.text());
-            const data = await resp.arrayBuffer();
-
-            const tabContainer = document.createElement('div');
-            tabContainer.style.cssText =
-                'position:absolute;top:0;left:0;right:0;bottom:' +
-                ((panel.bar.offsetHeight || 28) + 'px') +
-                ';overflow:auto;background:#fff;z-index:2;';
-            panel.panelDiv.appendChild(tabContainer);
-
-            const tv = window.createTabView({
-                container: tabContainer,
-                getBeats: () => panel.hw.getBeats(),
-                getCurrentTime: () => { const a = document.getElementById('audio'); return a ? a.currentTime : 0; },
-            });
-            await tv.load(data);
-            tv.startSync();
-
-            panel.canvas.style.display = 'none';
-            panel.tabContainer = tabContainer;
-            panel.tabInstance = tv;
-            panel.tabActive = true;
-            panel.updateTabStyle(true);
-        } catch (e) {
-            console.error('[splitscreen] tab view error:', e);
-            alert('Tab View error: ' + (e.message || e));
-        } finally {
-            panel.tabBtn.textContent = prevLabel;
-            panel.tabBtn.disabled = false;
         }
     }
 
@@ -2971,7 +2735,6 @@ try {
     function switchPanelArrangement(panel, arrIndex) {
         panel.arrIndex = arrIndex;
         panel.arrName.textContent = arrangements[arrIndex]?.name || '';
-        if (panel.tabActive) togglePanelTab(panel);
         recreatePanelHighway(panel);
         hookPanelReady(panel);
         panel.hw.connect(getWsUrl(currentFilename, arrIndex), { onSongInfo: () => {} });
@@ -3045,17 +2808,9 @@ try {
                 p.chordsOverlay.destroy();
                 p.chordsOverlay = null;
             }
-            if (p.jumpingTabPane) {
-                p.jumpingTabPane.destroy();
-                p.jumpingTabPane = null;
-            }
             if (p.vizMode) {
                 p.hw.setRenderer(null);
                 p.vizMode = null;
-            }
-            if (p.tabInstance) {
-                try { p.tabInstance.destroy(); } catch (_) {}
-                p.tabInstance = null;
             }
             p.hw.stop();
         }
@@ -3076,7 +2831,6 @@ try {
      */
     function _captureMode(panel) {
         if (panel.lyricsMode) return 'lyrics';
-        if (panel.jumpingTabMode) return 'jt';
         if (panel.vizMode) return 'viz:' + panel.vizMode;
         return '2d';
     }
@@ -3093,7 +2847,6 @@ try {
      */
     function _modeToArrName(mode, arrNameStr) {
         if (mode === 'lyrics') return LYRICS_VALUE;
-        if (mode === 'jt') return JUMPING_TAB_VALUE + ':' + arrNameStr;
         if (mode === '3d') return VIZ_PREFIX + ':highway_3d:' + arrNameStr;
         if (mode?.startsWith('viz:')) return VIZ_PREFIX + ':' + mode.slice(4) + ':' + arrNameStr;
         return arrNameStr;
@@ -3429,10 +3182,6 @@ try {
                 const pref = savedPrefs[i % savedPrefs.length];
                 if (pref && pref.arrName === LYRICS_VALUE) {
                     arrDefaults.push(0);
-                } else if (pref && pref.arrName?.startsWith(JUMPING_TAB_VALUE)) {
-                    const jtArrName = pref.arrName.slice(JUMPING_TAB_VALUE.length + 1);
-                    const jtIdx = resolveArrIndex(jtArrName);
-                    arrDefaults.push(jtIdx >= 0 ? jtIdx : 0);
                 } else if (pref && pref.arrName?.startsWith(VIZ_PREFIX + ':')) {
                     const parts = pref.arrName.split(':');
                     const vizArrName = parts.slice(2).join(':');
@@ -3712,7 +3461,7 @@ try {
             if (!audio || !active) return;
             const t = audio.currentTime;
             for (const p of panels) {
-                if (!p.lyricsMode && !p.jumpingTabMode) p.hw.setTime(t);
+                if (!p.lyricsMode) p.hw.setTime(t);
             }
         }, 1000 / 60);
     }
@@ -4547,11 +4296,7 @@ try {
             panel.barToggleBtn.style.width = '';
             panel.barToggleBtn.style.padding = '2px 6px';
         }
-        if (panel.jumpingTabMode && panel.jumpingTabPane) {
-            panel.jumpingTabPane.resize();
-        } else if (!panel.lyricsMode) {
-            panel.hw.resize();
-        }
+        if (!panel.lyricsMode) panel.hw.resize();
         if (panel.chordsOverlay) panel.chordsOverlay.resize();
         savePanelPrefs();
     }
@@ -4849,7 +4594,7 @@ try {
             const est = _followerAnchorT + _followerObservedRate * wall;
             _followerCurrentTime = est;
             for (const p of panels) {
-                if (!p.lyricsMode && !p.jumpingTabMode) p.hw.setTime(est);
+                if (!p.lyricsMode) p.hw.setTime(est);
             }
         };
         _followerInterpRaf = requestAnimationFrame(tick);
@@ -4897,7 +4642,7 @@ try {
         _followerAnchorPerf = nowP;
         _followerCurrentTime = t;
         for (const p of panels) {
-            if (!p.lyricsMode && !p.jumpingTabMode) p.hw.setTime(t);
+            if (!p.lyricsMode) p.hw.setTime(t);
         }
         if (advancedInRealtime || playing === true) {
             // Either the clock observably moved, or the main says it's playing
@@ -4924,7 +4669,7 @@ try {
             // Snap every panel to the last known time so a half-extrapolated
             // frame doesn't linger on screen.
             for (const p of panels) {
-                if (!p.lyricsMode && !p.jumpingTabMode) p.hw.setTime(_followerAnchorT);
+                if (!p.lyricsMode) p.hw.setTime(_followerAnchorT);
             }
             _followerCurrentTime = _followerAnchorT;
         }
@@ -5107,24 +4852,23 @@ try {
         _startFollowerInterp();
 
         // Resize handler: walk every live panel — multi-panel popups
-        // (top-bottom, left-right, quad) need each highway / JT pane
-        // resized, not just panels[0]. Mirrors sizeCanvases()'s loop
-        // shape but doesn't touch wrap positioning (the follower wrap's
-        // top/bottom are set once at build time and don't need to track
-        // window chrome the way the main-window wrap does).
+        // (top-bottom, left-right, quad) need each highway resized, not just
+        // panels[0]. Mirrors sizeCanvases()'s loop shape but doesn't touch
+        // wrap positioning (the follower wrap's top/bottom are set once at
+        // build time and don't need to track window chrome the way the
+        // main-window wrap does).
         window.addEventListener('resize', () => {
             // Batch every panel's getBoundingClientRect()/offsetHeight reads
             // before any panel's canvas-size writes — see sizeCanvases() for
             // why interleaving them per panel forces a layout recalc on each
             // iteration (only matters once multi-panel popups exist).
             const measured = panels.map((p) => (
-                (!p.lyricsMode && !(p.jumpingTabMode && p.jumpingTabPane))
+                !p.lyricsMode
                     ? { rect: p.panelDiv.getBoundingClientRect(), barH: p.bar.style.display === 'none' ? 0 : (p.bar.offsetHeight || 28) }
                     : null
             ));
             panels.forEach((p, i) => {
-                if (p.jumpingTabMode && p.jumpingTabPane) p.jumpingTabPane.resize();
-                else if (!p.lyricsMode) p.hw.resize(measured[i]);
+                if (!p.lyricsMode) p.hw.resize(measured[i]);
             });
         });
 
@@ -5649,7 +5393,6 @@ try {
             const panelLabels = panels.map((p, idx) => {
                 const arrName = arrangements[p.arrIndex]?.name || 'Arr ' + p.arrIndex;
                 const modeSuffix = p.lyricsMode ? ' (Lyrics)'
-                    : p.jumpingTabMode ? ' (JT)'
                     : p.vizMode ? ' (' + (vizPlugins.find(vp => vp.id === p.vizMode)?.name || p.vizMode) + ')'
                     : '';
                 return 'P' + (idx + 1) + ': ' + arrName + modeSuffix;
