@@ -209,7 +209,9 @@ try {
         if (/bass/.test(value)) return { instrument: 'bass', role: 'bass' };
         if (/piano|keys|keyboard|synth/.test(value)) return { instrument: 'keys', role: 'instrumental' };
         if (/drum/.test(value)) return { instrument: 'drums', role: 'instrumental' };
-        return { instrument: 'guitar', role: /rhythm/.test(value) ? 'rhythm' : /lead/.test(value) ? 'lead' : 'instrumental' };
+        if (/rhythm/.test(value)) return { instrument: 'guitar', role: 'rhythm' };
+        if (/lead/.test(value)) return { instrument: 'guitar', role: 'lead' };
+        return { instrument: 'guitar', role: 'instrumental' };
     }
 
     function _publishPanelContext(panel) {
@@ -751,7 +753,7 @@ try {
             const panel = panels[i];
             if (!panel || !patch || typeof patch !== 'object') return null;
             const allowed = ['profile_id', 'profile_hash', 'profile_ready', 'instrument', 'role', 'skill'];
-            panel.playerContextOverrides = {};
+            panel.playerContextOverrides = panel.playerContextOverrides || {};
             for (const key of allowed) {
                 if (patch[key] != null) panel.playerContextOverrides[key] = patch[key];
             }
@@ -884,6 +886,7 @@ try {
             barHidden: p.bar.style.display === 'none',
             mastery: p.hw.getMastery(),
             name: p.name || '',
+            playerId: p.playerId || null,
         };
     }
     /**
@@ -2218,12 +2221,17 @@ try {
         // context, event listeners) via its own cleanup path, then recreate
         // the highway to give the fresh 2D renderer a clean canvas.
         panel.hw.setRenderer(null);
+        // Assign the new arrangement BEFORE recreatePanelHighway() runs — it
+        // publishes the panel's player context (with the current arrIndex)
+        // as part of installing the fresh highway, so publishing with the
+        // stale index would attribute the rebuilt detector/context to the
+        // arrangement being left rather than the one being entered.
+        panel.arrIndex = arrIndex;
         recreatePanelHighway(panel);
         panel.vizMode = null;
 
         _hideVizControls(panel);
 
-        panel.arrIndex = arrIndex;
         panel.arrName.textContent = arrangements[arrIndex]?.name || '';
         hookPanelReady(panel);
         panel.hw.connect(getWsUrl(currentFilename, arrIndex), { onSongInfo: () => {} });
@@ -2907,7 +2915,12 @@ try {
             p.hw.stop();
         }
         panels = [];
-        nextPlayerNumber = 1;
+        // A transient teardown (rebuildLayout, pop-out, dock) restarts
+        // immediately and restores each surviving panel's playerId from
+        // savedPrefs — resetting the counter here would let a freshly
+        // auto-assigned id (a genuinely new panel) collide with one being
+        // restored. Only a REAL stop clears it.
+        if (!_ssTransientTeardown) nextPlayerNumber = 1;
         if (wrap) {
             wrap.remove();
             wrap = null;
@@ -3355,6 +3368,18 @@ try {
 
             panels.push(panel);
             const panelPrefs = savedPrefs ? savedPrefs[i % savedPrefs.length] : null;
+            // Restore this slot's stable player identity across a rebuild
+            // (layout change, pop-out/dock) so profile/mastery/scoring state
+            // keyed by player_id stays attached to the same surviving panel
+            // instead of being renumbered. Only trust it when savedPrefs has
+            // exactly one entry per panel — the modulo-reuse above means a
+            // shorter savedPrefs array (e.g. growing from 2 panels to 4) would
+            // otherwise hand the same playerId to more than one new panel.
+            if (panelPrefs?.playerId && savedPrefs.length >= cfg.panels) {
+                panel.playerId = panelPrefs.playerId;
+                const n = parseInt(String(panelPrefs.playerId).replace(/^player-/, ''), 10);
+                if (Number.isFinite(n) && n >= nextPlayerNumber) nextPlayerNumber = n + 1;
+            }
             initPanel(panel, arrDefaults[i], panelPrefs);
             panel.barToggleBtn.onclick = () => togglePanelBar(panel);
             if (panelPrefs?.barHidden) togglePanelBar(panel);

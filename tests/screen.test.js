@@ -2199,3 +2199,34 @@ test('recreatePanelHighway always turns off the highway-native lyrics flag (the 
         delete global.createHighway;
     }
 });
+
+// ── Player-context overrides: patch semantics (splitscreen#50) ─────────────
+// window.slopsmithSplitscreen.setPlayerContext(i, patch) must PATCH the
+// panel's stored overrides, not replace them — otherwise an override set by
+// one caller (e.g. a profile_id from one system) is silently dropped the
+// next time a different caller patches an unrelated field (e.g. skill).
+
+test('setPlayerContext merges a second patch onto the first instead of replacing it', () => {
+    const mod = freshPlugin();
+    const panel = { hw: {} };
+    mod._setPanelsForTest([panel]);
+
+    global.window.slopsmithSplitscreen.setPlayerContext(0, { profile_id: 'p1' });
+    assert.equal(panel.playerContextOverrides.profile_id, 'p1');
+
+    global.window.slopsmithSplitscreen.setPlayerContext(0, { skill: 'overall' });
+    assert.equal(panel.playerContextOverrides.profile_id, 'p1',
+        'a later patch for an unrelated field must not drop an earlier override');
+    assert.equal(panel.playerContextOverrides.skill, 'overall');
+});
+
+test('setPlayerContext only touches keys present in the patch, leaving the rest untouched', () => {
+    const mod = freshPlugin();
+    const panel = { hw: {} };
+    mod._setPanelsForTest([panel]);
+
+    global.window.slopsmithSplitscreen.setPlayerContext(0, { profile_id: 'p1', instrument: 'bass' });
+    global.window.slopsmithSplitscreen.setPlayerContext(0, { role: 'lead' });
+
+    assert.deepEqual(panel.playerContextOverrides, { profile_id: 'p1', instrument: 'bass', role: 'lead' });
+});
