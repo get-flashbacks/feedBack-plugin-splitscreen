@@ -1772,3 +1772,160 @@ test('buildVizPopover bails when getPanelControlsFor returns null', () => {
 
     assert.equal(pop.children.length, 0, 'popover should be empty when there are no per-panel controls');
 });
+
+// ── sizeCanvases() (splitscreen#52) ─────────────────────────────────────────
+// Covers the invariants CLAUDE.md flags as fragile: controlsH derivation
+// (player-footer > player-controls > 50px default), the section-map top
+// offset, batching reads before writes (each panel's hw.resize gets a
+// precomputed {rect, barH} rather than measuring itself), skipping lyrics
+// panels, and always resizing a chordsOverlay when present.
+
+function makeSizeCanvasesDocumentStub(elements) {
+    return {
+        getElementById: (id) => elements[id] || null,
+        addEventListener: noop,
+        body: { appendChild: noop },
+        createElement: () => ({
+            style: {}, classList: { add: noop, remove: noop }, addEventListener: noop,
+            appendChild: noop, setAttribute: noop,
+        }),
+        readyState: 'loading',
+    };
+}
+
+function makeSizeCanvasesPanel(overrides = {}) {
+    const resizeCalls = [];
+    return Object.assign({
+        lyricsMode: false,
+        panelDiv: { getBoundingClientRect: () => ({ width: 400, height: 300 }) },
+        bar: { style: { display: '' }, offsetHeight: 28 },
+        hw: { resize: (measured) => resizeCalls.push(measured) },
+        _resizeCalls: resizeCalls,
+    }, overrides);
+}
+
+test('sizeCanvases is a no-op with no wrap or no panels', () => {
+    const mod = freshPlugin();
+    mod._setWrapForTest(null);
+    mod._setPanelsForTest([makeSizeCanvasesPanel()]);
+    assert.doesNotThrow(() => mod.sizeCanvases());
+
+    mod._setWrapForTest({ style: {} });
+    mod._setPanelsForTest([]);
+    assert.doesNotThrow(() => mod.sizeCanvases());
+});
+
+test('sizeCanvases prefers #player-footer height over #player-controls, falling back to 50px', () => {
+    const mod = freshPlugin();
+    global.document = makeSizeCanvasesDocumentStub({
+        'player-footer': { offsetHeight: 80 },
+        'player-controls': { offsetHeight: 40 },
+    });
+    const wrap = { style: {} };
+    mod._setWrapForTest(wrap);
+    mod._setPanelsForTest([makeSizeCanvasesPanel()]);
+    mod.sizeCanvases();
+    assert.equal(wrap.style.bottom, '80px', 'player-footer height wins when present');
+});
+
+test('sizeCanvases falls back to #player-controls when no #player-footer exists', () => {
+    const mod = freshPlugin();
+    global.document = makeSizeCanvasesDocumentStub({
+        'player-controls': { offsetHeight: 40 },
+    });
+    const wrap = { style: {} };
+    mod._setWrapForTest(wrap);
+    mod._setPanelsForTest([makeSizeCanvasesPanel()]);
+    mod.sizeCanvases();
+    assert.equal(wrap.style.bottom, '40px');
+});
+
+test('sizeCanvases defaults controlsH to 50px when neither chrome element exists', () => {
+    const mod = freshPlugin();
+    global.document = makeSizeCanvasesDocumentStub({});
+    const wrap = { style: {} };
+    mod._setWrapForTest(wrap);
+    mod._setPanelsForTest([makeSizeCanvasesPanel()]);
+    mod.sizeCanvases();
+    assert.equal(wrap.style.bottom, '50px');
+});
+
+test('sizeCanvases offsets the wrap top by #section-map height when present', () => {
+    const mod = freshPlugin();
+    global.document = makeSizeCanvasesDocumentStub({
+        'player-controls': { offsetHeight: 40 },
+        'section-map': { offsetHeight: 22 },
+    });
+    const wrap = { style: {} };
+    mod._setWrapForTest(wrap);
+    mod._setPanelsForTest([makeSizeCanvasesPanel()]);
+    mod.sizeCanvases();
+    assert.equal(wrap.style.top, '22px');
+});
+
+test('sizeCanvases defaults the wrap top to 0px without a #section-map', () => {
+    const mod = freshPlugin();
+    global.document = makeSizeCanvasesDocumentStub({ 'player-controls': { offsetHeight: 40 } });
+    const wrap = { style: {} };
+    mod._setWrapForTest(wrap);
+    mod._setPanelsForTest([makeSizeCanvasesPanel()]);
+    mod.sizeCanvases();
+    assert.equal(wrap.style.top, '0px');
+});
+
+test('sizeCanvases passes each panel a precomputed {rect, barH}, measured before any writes', () => {
+    const mod = freshPlugin();
+    global.document = makeSizeCanvasesDocumentStub({ 'player-controls': { offsetHeight: 40 } });
+    mod._setWrapForTest({ style: {} });
+    const panel = makeSizeCanvasesPanel();
+    mod._setPanelsForTest([panel]);
+    mod.sizeCanvases();
+    assert.equal(panel._resizeCalls.length, 1);
+    assert.deepEqual(panel._resizeCalls[0].rect, { width: 400, height: 300 });
+    assert.equal(panel._resizeCalls[0].barH, 28, 'visible bar contributes its offsetHeight');
+});
+
+test('sizeCanvases treats a hidden bar as 0 height and defaults an unmeasured offsetHeight to 28', () => {
+    const mod = freshPlugin();
+    global.document = makeSizeCanvasesDocumentStub({ 'player-controls': { offsetHeight: 40 } });
+    mod._setWrapForTest({ style: {} });
+    const hidden = makeSizeCanvasesPanel({ bar: { style: { display: 'none' }, offsetHeight: 28 } });
+    const unmeasured = makeSizeCanvasesPanel({ bar: { style: { display: '' }, offsetHeight: 0 } });
+    mod._setPanelsForTest([hidden, unmeasured]);
+    mod.sizeCanvases();
+    assert.equal(hidden._resizeCalls[0].barH, 0, 'display:none bar must not contribute height');
+    assert.equal(unmeasured._resizeCalls[0].barH, 28, 'a falsy offsetHeight (0) falls back to the 28px default');
+});
+
+test('sizeCanvases skips hw.resize entirely for a lyrics-mode panel', () => {
+    const mod = freshPlugin();
+    global.document = makeSizeCanvasesDocumentStub({ 'player-controls': { offsetHeight: 40 } });
+    mod._setWrapForTest({ style: {} });
+    const panel = makeSizeCanvasesPanel({ lyricsMode: true });
+    mod._setPanelsForTest([panel]);
+    mod.sizeCanvases();
+    assert.equal(panel._resizeCalls.length, 0, 'a lyrics-mode panel must not be measured or resized');
+});
+
+test('sizeCanvases resizes a chordsOverlay when present, regardless of lyrics mode', () => {
+    const mod = freshPlugin();
+    global.document = makeSizeCanvasesDocumentStub({ 'player-controls': { offsetHeight: 40 } });
+    mod._setWrapForTest({ style: {} });
+    let overlayResized = 0;
+    const panel = makeSizeCanvasesPanel({ lyricsMode: true, chordsOverlay: { resize: () => { overlayResized++; } } });
+    mod._setPanelsForTest([panel]);
+    mod.sizeCanvases();
+    assert.equal(overlayResized, 1, 'chordsOverlay.resize() must run even for a lyrics-mode panel');
+});
+
+test('sizeCanvases resizes every panel independently in a multi-panel layout', () => {
+    const mod = freshPlugin();
+    global.document = makeSizeCanvasesDocumentStub({ 'player-controls': { offsetHeight: 40 } });
+    mod._setWrapForTest({ style: {} });
+    const p1 = makeSizeCanvasesPanel({ panelDiv: { getBoundingClientRect: () => ({ width: 200, height: 150 }) } });
+    const p2 = makeSizeCanvasesPanel({ panelDiv: { getBoundingClientRect: () => ({ width: 300, height: 250 }) } });
+    mod._setPanelsForTest([p1, p2]);
+    mod.sizeCanvases();
+    assert.equal(p1._resizeCalls[0].rect.width, 200);
+    assert.equal(p2._resizeCalls[0].rect.width, 300);
+});
