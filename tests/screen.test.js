@@ -1955,3 +1955,233 @@ test('sizeCanvases measures every panel before writing any resize (no interleave
     assert.ok(lastMeasureIdx < firstResizeIdx,
         `all measurements must complete before the first resize write; got order: ${ops.join(', ')}`);
 });
+
+// ── Render-mode / per-panel viz lifecycle (splitscreen#53) ──────────────────
+// _showVizControls/_hideVizControls own the "3D ⚙" button + popover visible
+// only in viz mode, and recreatePanelHighway discards the old highway
+// instance (stopping it, transferring inverted/lefty/mastery, replacing the
+// canvas element) before installing a fresh one — the mechanism enterVizMode/
+// exitVizMode/arrangement-switching all build on.
+
+function makeVizLifecyclePanel(overrides = {}) {
+    return Object.assign({
+        vizSettingsBtn: { style: {} },
+        vizPopover: { style: {}, innerHTML: '<stale>' },
+    }, overrides);
+}
+
+test('_showVizControls hides the button when the plugin has no per-panel controls', () => {
+    const mod = freshPlugin();
+    const panel = makeVizLifecyclePanel();
+    mod._showVizControls(panel, 'piano'); // no descriptor for 'piano'
+    assert.equal(panel.vizSettingsBtn.style.display, 'none');
+    assert.equal(panel.vizPopover.innerHTML, '');
+});
+
+test('_showVizControls shows the button and builds the popover when controls exist', () => {
+    const mod = freshVizPlugin();
+    mod._setArrangementsForTest([{ name: 'Lead' }]);
+    const pop = makeVizElementStub('div');
+    const panel = { vizSettingsBtn: { style: {} }, vizPopover: pop, vizMode: 'highway_3d' };
+    mod._setPanelsForTest([panel]);
+    mod._showVizControls(panel, 'highway_3d');
+    assert.equal(panel.vizSettingsBtn.style.display, '');
+    assert.ok(pop.children.length > 0, 'popover must be populated for a plugin with controls');
+});
+
+test('_showVizControls treats an empty plugin-published panelControls as an opt-out (hides, same as no descriptor)', () => {
+    const mod = freshVizPlugin();
+    window.feedBackViz_highway_3d = function () {};
+    window.feedBackViz_highway_3d.panelControls = [];
+    const panel = makeVizLifecyclePanel();
+    mod._showVizControls(panel, 'highway_3d');
+    assert.equal(panel.vizSettingsBtn.style.display, 'none');
+});
+
+test('_showVizControls is a no-op when the panel has no vizSettingsBtn at all', () => {
+    const mod = freshPlugin();
+    const panel = { vizPopover: { style: {}, innerHTML: '' } };
+    assert.doesNotThrow(() => mod._showVizControls(panel, 'highway_3d'));
+});
+
+test('_hideVizControls hides the button and empties the popover', () => {
+    const mod = freshPlugin();
+    const panel = makeVizLifecyclePanel();
+    panel.vizSettingsBtn.style.display = '';
+    panel.vizPopover.style.display = '';
+    mod._hideVizControls(panel);
+    assert.equal(panel.vizSettingsBtn.style.display, 'none');
+    assert.equal(panel.vizPopover.style.display, 'none');
+    assert.equal(panel.vizPopover.innerHTML, '');
+});
+
+test('_hideVizControls tolerates a panel with no button or popover', () => {
+    const mod = freshPlugin();
+    assert.doesNotThrow(() => mod._hideVizControls({}));
+});
+
+test('_closeAllVizPopovers hides every panel\'s popover without touching panels that have none', () => {
+    const mod = freshPlugin();
+    const p1 = { vizPopover: { style: { display: '' } } };
+    const p2 = { vizPopover: null };
+    const p3 = { vizPopover: { style: { display: '' } } };
+    mod._setPanelsForTest([p1, p2, p3]);
+    assert.doesNotThrow(() => mod._closeAllVizPopovers());
+    assert.equal(p1.vizPopover.style.display, 'none');
+    assert.equal(p3.vizPopover.style.display, 'none');
+});
+
+// ── recreatePanelHighway ─────────────────────────────────────────────────────
+
+function makeFakeHighway(overrides = {}) {
+    return Object.assign({
+        _stopped: false,
+        stop() { this._stopped = true; },
+        getInverted: () => false,
+        getLefty: () => false,
+        getMastery: () => 0.5,
+        getRenderScale: () => 1,
+        setInverted: noop,
+        setLefty: noop,
+        setLyricsVisible: noop,
+        setMastery: noop,
+        setRenderer: noop,
+        init: noop,
+        resize: noop,
+    }, overrides);
+}
+
+function makeCanvasStub() {
+    let replaced = null;
+    return {
+        style: { cssText: 'width:100%;height:100%;display:block;' },
+        replaceWith(next) { replaced = next; },
+        _getReplacedWith: () => replaced,
+    };
+}
+
+function freshVizLifecyclePlugin() {
+    const mod = freshVizPlugin();
+    return mod;
+}
+
+test('recreatePanelHighway stops the old highway before installing the new one', () => {
+    const mod = freshVizLifecyclePlugin();
+    const oldHw = makeFakeHighway();
+    const newHw = makeFakeHighway();
+    global.createHighway = () => newHw;
+    const oldCanvas = makeCanvasStub();
+    const panel = {
+        hw: oldHw, canvas: oldCanvas,
+        panelDiv: { getBoundingClientRect: () => ({ width: 100, height: 100 }) },
+        bar: { style: { display: '' }, offsetHeight: 28 },
+    };
+    try {
+        mod.recreatePanelHighway(panel);
+        assert.equal(oldHw._stopped, true, 'the old highway must be stopped');
+        assert.equal(panel.hw, newHw, 'the panel must now reference the fresh highway');
+    } finally {
+        delete global.createHighway;
+    }
+});
+
+test('recreatePanelHighway replaces the canvas element (context-type lock workaround)', () => {
+    const mod = freshVizLifecyclePlugin();
+    global.createHighway = () => makeFakeHighway();
+    const oldCanvas = makeCanvasStub();
+    const panel = {
+        hw: makeFakeHighway(), canvas: oldCanvas,
+        panelDiv: { getBoundingClientRect: () => ({ width: 100, height: 100 }) },
+        bar: { style: { display: '' }, offsetHeight: 28 },
+    };
+    try {
+        mod.recreatePanelHighway(panel);
+        assert.notEqual(panel.canvas, oldCanvas, 'a fresh canvas element must replace the old one');
+        assert.equal(oldCanvas._getReplacedWith(), panel.canvas, 'replaceWith must have been called with the new canvas');
+    } finally {
+        delete global.createHighway;
+    }
+});
+
+test('recreatePanelHighway transfers inverted/lefty/mastery from the old highway to the new one', () => {
+    const mod = freshVizLifecyclePlugin();
+    const oldHw = makeFakeHighway({ getInverted: () => true, getLefty: () => true, getMastery: () => 0.75 });
+    let seenInverted = null, seenLefty = null, seenMastery = null;
+    const newHw = makeFakeHighway({
+        setInverted: (v) => { seenInverted = v; },
+        setLefty: (v) => { seenLefty = v; },
+        setMastery: (v) => { seenMastery = v; },
+    });
+    global.createHighway = () => newHw;
+    const panel = {
+        hw: oldHw, canvas: makeCanvasStub(),
+        panelDiv: { getBoundingClientRect: () => ({ width: 100, height: 100 }) },
+        bar: { style: { display: '' }, offsetHeight: 28 },
+    };
+    try {
+        mod.recreatePanelHighway(panel);
+        assert.equal(seenInverted, true);
+        assert.equal(seenLefty, true);
+        assert.equal(seenMastery, 0.75);
+    } finally {
+        delete global.createHighway;
+    }
+});
+
+test('recreatePanelHighway pre-installs a supplied renderer before init (context-type lock)', () => {
+    const mod = freshVizLifecyclePlugin();
+    const order = [];
+    const newHw = makeFakeHighway({
+        setRenderer: (r) => { order.push('setRenderer:' + r); },
+        init: () => { order.push('init'); },
+    });
+    global.createHighway = () => newHw;
+    const panel = {
+        hw: makeFakeHighway(), canvas: makeCanvasStub(),
+        panelDiv: { getBoundingClientRect: () => ({ width: 100, height: 100 }) },
+        bar: { style: { display: '' }, offsetHeight: 28 },
+    };
+    try {
+        mod.recreatePanelHighway(panel, { preInstallRenderer: 'fake-renderer' });
+        assert.deepEqual(order, ['setRenderer:fake-renderer', 'init'],
+            'setRenderer must run before init so the canvas locks to the right context type');
+    } finally {
+        delete global.createHighway;
+    }
+});
+
+test('recreatePanelHighway does not call setRenderer when no renderer is supplied', () => {
+    const mod = freshVizLifecyclePlugin();
+    let setRendererCalled = false;
+    const newHw = makeFakeHighway({ setRenderer: () => { setRendererCalled = true; } });
+    global.createHighway = () => newHw;
+    const panel = {
+        hw: makeFakeHighway(), canvas: makeCanvasStub(),
+        panelDiv: { getBoundingClientRect: () => ({ width: 100, height: 100 }) },
+        bar: { style: { display: '' }, offsetHeight: 28 },
+    };
+    try {
+        mod.recreatePanelHighway(panel);
+        assert.equal(setRendererCalled, false);
+    } finally {
+        delete global.createHighway;
+    }
+});
+
+test('recreatePanelHighway always turns off the highway-native lyrics flag (the panel-owned overlay is the single lyrics display)', () => {
+    const mod = freshVizLifecyclePlugin();
+    let seenLyricsVisible = 'unset';
+    const newHw = makeFakeHighway({ setLyricsVisible: (v) => { seenLyricsVisible = v; } });
+    global.createHighway = () => newHw;
+    const panel = {
+        hw: makeFakeHighway(), canvas: makeCanvasStub(),
+        panelDiv: { getBoundingClientRect: () => ({ width: 100, height: 100 }) },
+        bar: { style: { display: '' }, offsetHeight: 28 },
+    };
+    try {
+        mod.recreatePanelHighway(panel);
+        assert.equal(seenLyricsVisible, false);
+    } finally {
+        delete global.createHighway;
+    }
+});
