@@ -5725,6 +5725,8 @@ try {
             LAYOUTS, applyLayoutStyle, _bestFitLayout,
             _setArrangementsForTest(next) { arrangements = next; },
             _setPanelsForTest(next) { panels = next; },
+            sizeCanvases,
+            _setWrapForTest(next) { wrap = next; },
             stopLanShare,
             startLanShare,
             _lanSend,
