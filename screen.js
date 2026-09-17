@@ -5720,9 +5720,18 @@ try {
             panelToPrefs, migratePanelPrefs, _ctlRange,
             getSyncUrl, generateRoomKey, normalizeRoomKey, ensureRoomKey,
             buildShareUrl, makeRemoteFollowerCfg, ROOM_KEY_ALPHABET,
+            LAN_TIME_MIN_INTERVAL_MS,
             LAYOUTS, applyLayoutStyle, _bestFitLayout,
             _setArrangementsForTest(next) { arrangements = next; },
             stopLanShare,
+            startLanShare,
+            _lanSend,
+            _maybeResumeLanShare,
+            _setCurrentFilenameForTest(next) { currentFilename = next; },
+            _setPopupsForTest(next) {
+                popups.clear();
+                for (const [k, v] of (next || [])) popups.set(k, v);
+            },
             _setLanShareForTest(next) { _lanShare = next; },
             _getLanShareForTest() { return _lanShare; },
             _shouldTeardownOnScreenChange,
