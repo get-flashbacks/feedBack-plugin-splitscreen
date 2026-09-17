@@ -2065,11 +2065,20 @@ function freshVizLifecyclePlugin() {
     return mod;
 }
 
-test('recreatePanelHighway stops the old highway before installing the new one', () => {
+test('recreatePanelHighway stops the old highway before the replacement is created and installed', () => {
+    // Codex review finding on PR #61: checking final state alone (stopped ===
+    // true, panel.hw === newHw) doesn't pin WHEN stop() happens — moving it
+    // to just before hw.init() left both assertions green. Record an
+    // operation log instead and assert 'stop' precedes every replacement step.
     const mod = freshVizLifecyclePlugin();
-    const oldHw = makeFakeHighway();
-    const newHw = makeFakeHighway();
-    global.createHighway = () => newHw;
+    const ops = [];
+    const oldHw = makeFakeHighway({ stop() { ops.push('old.stop'); } });
+    let newHw;
+    global.createHighway = () => {
+        ops.push('createHighway');
+        newHw = makeFakeHighway({ init: (c) => { ops.push('init:' + (c === panel.canvas ? 'newCanvas' : 'other')); } });
+        return newHw;
+    };
     const oldCanvas = makeCanvasStub();
     const panel = {
         hw: oldHw, canvas: oldCanvas,
@@ -2078,16 +2087,24 @@ test('recreatePanelHighway stops the old highway before installing the new one',
     };
     try {
         mod.recreatePanelHighway(panel);
-        assert.equal(oldHw._stopped, true, 'the old highway must be stopped');
+        assert.equal(ops[0], 'old.stop', `old.stop() must happen before anything else; got order: ${ops.join(', ')}`);
+        assert.ok(ops.indexOf('old.stop') < ops.indexOf('createHighway'), 'stop must precede creating the replacement highway');
+        assert.ok(ops.indexOf('old.stop') < ops.indexOf('init:newCanvas'), 'stop must precede installing the replacement');
         assert.equal(panel.hw, newHw, 'the panel must now reference the fresh highway');
     } finally {
         delete global.createHighway;
     }
 });
 
-test('recreatePanelHighway replaces the canvas element (context-type lock workaround)', () => {
+test('recreatePanelHighway replaces the canvas element and initializes the NEW highway against it, not the old one', () => {
+    // Codex review finding on PR #61: the original test never checked what
+    // hw.init() was actually called with — an implementation that replaced
+    // the DOM element but still initialized against the detached oldCanvas
+    // (leaving the highway attached to a context-locked, unrendered element)
+    // passed unchanged.
     const mod = freshVizLifecyclePlugin();
-    global.createHighway = () => makeFakeHighway();
+    let initedWith = null;
+    global.createHighway = () => makeFakeHighway({ init: (c) => { initedWith = c; } });
     const oldCanvas = makeCanvasStub();
     const panel = {
         hw: makeFakeHighway(), canvas: oldCanvas,
@@ -2098,6 +2115,8 @@ test('recreatePanelHighway replaces the canvas element (context-type lock workar
         mod.recreatePanelHighway(panel);
         assert.notEqual(panel.canvas, oldCanvas, 'a fresh canvas element must replace the old one');
         assert.equal(oldCanvas._getReplacedWith(), panel.canvas, 'replaceWith must have been called with the new canvas');
+        assert.equal(initedWith, panel.canvas, 'hw.init() must be called with the NEW canvas, not the detached old one');
+        assert.notEqual(initedWith, oldCanvas, 'the highway must never be initialized against the old, now-detached canvas');
     } finally {
         delete global.createHighway;
     }
