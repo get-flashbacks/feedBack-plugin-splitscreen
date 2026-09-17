@@ -1929,3 +1929,29 @@ test('sizeCanvases resizes every panel independently in a multi-panel layout', (
     assert.equal(p1._resizeCalls[0].rect.width, 200);
     assert.equal(p2._resizeCalls[0].rect.width, 300);
 });
+
+test('sizeCanvases measures every panel before writing any resize (no interleaved read-write-read-write)', () => {
+    // The function's own comment claims all layout READS happen before any
+    // WRITE, to avoid one forced layout flush per panel. A regression to a
+    // single per-panel loop (measure-then-resize-then-measure-then-resize)
+    // wouldn't be caught by checking resize() call *arguments* alone — it
+    // needs an ordering assertion across panels.
+    const mod = freshPlugin();
+    global.document = makeSizeCanvasesDocumentStub({ 'player-controls': { offsetHeight: 40 } });
+    mod._setWrapForTest({ style: {} });
+    const ops = [];
+    const makeInstrumentedPanel = (name) => ({
+        lyricsMode: false,
+        panelDiv: { getBoundingClientRect: () => { ops.push(`measure:${name}`); return { width: 100, height: 100 }; } },
+        bar: { style: { display: '' }, offsetHeight: 28 },
+        hw: { resize: () => { ops.push(`resize:${name}`); } },
+    });
+    const p1 = makeInstrumentedPanel('p1');
+    const p2 = makeInstrumentedPanel('p2');
+    mod._setPanelsForTest([p1, p2]);
+    mod.sizeCanvases();
+    const firstResizeIdx = ops.indexOf('resize:p1');
+    const lastMeasureIdx = Math.max(ops.indexOf('measure:p1'), ops.indexOf('measure:p2'));
+    assert.ok(lastMeasureIdx < firstResizeIdx,
+        `all measurements must complete before the first resize write; got order: ${ops.join(', ')}`);
+});
