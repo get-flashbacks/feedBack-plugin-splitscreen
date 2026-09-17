@@ -1692,6 +1692,10 @@ try {
         // instance to it before its WebSocket can schedule a private rAF.
         if (_deterministicFramesActive && typeof hw.setExternalFrameDriver === 'function') {
             hw.setExternalFrameDriver(true);
+            // A panel may be recreated after a coordinator found no
+            // compatible panels (or after its last rAF was cancelled). Let
+            // this first compatible replacement arm the shared loop.
+            _startDeterministicFrames();
         }
         hw.setInverted(inverted);
         hw.setLefty(lefty);
@@ -3462,6 +3466,7 @@ try {
     let _splitFrameRaf = null;
     let _splitFrameId = 0;
     let _deterministicFramesActive = false;
+    let _deterministicFrameTicking = false;
 
     function _canDriveFrames(panel) {
         return !!(panel && panel.hw
@@ -3470,24 +3475,34 @@ try {
     }
 
     function _startDeterministicFrames() {
-        if (_deterministicFramesActive || !panels.some(_canDriveFrames)) return;
+        // Keep the coordinator state separate from the transient rAF handle:
+        // the handle is intentionally null while tick() is executing.
         _deterministicFramesActive = true;
         for (const panel of panels) {
             if (_canDriveFrames(panel)) panel.hw.setExternalFrameDriver(true);
         }
+        // Back-compat: old hosts have no external-driver API. Keep the
+        // coordinator armed for a later compatible replacement, but do not
+        // burn a no-op rAF loop meanwhile.
+        if (_splitFrameRaf != null || _deterministicFrameTicking || !panels.some(_canDriveFrames)) return;
         const tick = (frameTime) => {
             _splitFrameRaf = null;
             if (!active || !_deterministicFramesActive) return;
-            const frameId = ++_splitFrameId;
-            // Snapshot the list: a renderer can synchronously trigger a
-            // layout change, but that must not make this frame half old and
-            // half new.
-            for (const panel of panels.slice()) {
-                if (!_canDriveFrames(panel)) continue;
-                try { panel.hw.renderFrame(frameTime, frameId); }
-                catch (err) { console.error('[splitscreen] external frame render failed:', err); }
+            _deterministicFrameTicking = true;
+            try {
+                const frameId = ++_splitFrameId;
+                // Snapshot the list: a renderer can synchronously trigger a
+                // layout change, but that must not make this frame half old
+                // and half new.
+                for (const panel of panels.slice()) {
+                    if (!_canDriveFrames(panel)) continue;
+                    try { panel.hw.renderFrame(frameTime, frameId); }
+                    catch (err) { console.error('[splitscreen] external frame render failed:', err); }
+                }
+            } finally {
+                _deterministicFrameTicking = false;
+                if (active && _deterministicFramesActive) _splitFrameRaf = requestAnimationFrame(tick);
             }
-            if (active && _deterministicFramesActive) _splitFrameRaf = requestAnimationFrame(tick);
         };
         _splitFrameRaf = requestAnimationFrame(tick);
     }
