@@ -206,6 +206,7 @@ try {
         if (panel.lyricsMode) return { instrument: 'voice', role: 'karaoke' };
         const arrangement = arrangements[panel.arrIndex] || {};
         const value = String(arrangement.type || arrangement.name || '').toLowerCase();
+        if (/vocal|voice|karaoke/.test(value)) return { instrument: 'voice', role: 'karaoke' };
         if (/bass/.test(value)) return { instrument: 'bass', role: 'bass' };
         if (/piano|keys|keyboard|synth/.test(value)) return { instrument: 'keys', role: 'instrumental' };
         if (/drum/.test(value)) return { instrument: 'drums', role: 'instrumental' };
@@ -221,7 +222,7 @@ try {
         const role = _panelRole(panel);
         const arrangement = arrangements[panel.arrIndex] || {};
         return api.upsert({
-            ...(panel.playerContextOverrides || {}),
+            ...panel.playerContextOverrides,
             player_id: panel.playerId,
             song_id: currentFilename || '',
             arrangement_id: String(panel.lyricsMode ? 'lyrics'
@@ -5808,6 +5809,7 @@ try {
             LAYOUTS, applyLayoutStyle, _bestFitLayout,
             _setArrangementsForTest(next) { arrangements = next; },
             _setPanelsForTest(next) { panels = next; },
+            _panelRole,
             sizeCanvases,
             recreatePanelHighway,
             _showVizControls,

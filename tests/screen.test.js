@@ -2230,3 +2230,31 @@ test('setPlayerContext only touches keys present in the patch, leaving the rest 
 
     assert.deepEqual(panel.playerContextOverrides, { profile_id: 'p1', instrument: 'bass', role: 'lead' });
 });
+
+// ── _panelRole: vocal/karaoke arrangement detection (pullfrog, splitscreen#62) ──
+// A vocals/karaoke arrangement running in a regular (non-lyrics) panel must be
+// labeled { instrument: 'voice', role: 'karaoke' } to match core's own
+// vocal/voice/karaoke normalization in player-identity.js — otherwise the
+// published context mislabels it as a generic guitar instrumental and core's
+// karaoke difficulty guard never engages for it.
+
+test('_panelRole detects a vocals/karaoke arrangement name and labels it voice/karaoke', () => {
+    const mod = freshPlugin();
+    mod._setArrangementsForTest([{ name: 'Vocals' }]);
+    const panel = { arrIndex: 0, lyricsMode: false };
+    assert.deepEqual(mod._panelRole(panel), { instrument: 'voice', role: 'karaoke' });
+});
+
+test('_panelRole still returns the lyrics-mode karaoke role when lyricsMode is set', () => {
+    const mod = freshPlugin();
+    mod._setArrangementsForTest([{ name: 'Lead' }]);
+    const panel = { arrIndex: 0, lyricsMode: true };
+    assert.deepEqual(mod._panelRole(panel), { instrument: 'voice', role: 'karaoke' });
+});
+
+test('_panelRole does not misclassify an unrelated arrangement as karaoke', () => {
+    const mod = freshPlugin();
+    mod._setArrangementsForTest([{ name: 'Lead Guitar' }]);
+    const panel = { arrIndex: 0, lyricsMode: false };
+    assert.deepEqual(mod._panelRole(panel), { instrument: 'guitar', role: 'lead' });
+});
