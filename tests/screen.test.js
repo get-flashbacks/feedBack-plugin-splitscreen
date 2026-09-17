@@ -1774,11 +1774,11 @@ test('buildVizPopover bails when getPanelControlsFor returns null', () => {
 });
 
 // ── sizeCanvases() (splitscreen#52) ─────────────────────────────────────────
-// Covers the invariants CLAUDE.md flags as fragile: controlsH derivation
-// (player-footer > player-controls > 50px default), the section-map top
-// offset, batching reads before writes (each panel's hw.resize gets a
-// precomputed {rect, barH} rather than measuring itself), skipping lyrics
-// panels, and always resizing a chordsOverlay when present.
+// Covers the invariants documented in screen.js's own inline comment above
+// the function (controlsH derivation — player-footer > player-controls >
+// 50px default — the section-map top offset, passing each panel a
+// precomputed {rect, barH} rather than letting it measure itself, skipping
+// lyrics panels, and always resizing a chordsOverlay when present).
 
 function makeSizeCanvasesDocumentStub(elements) {
     return {
