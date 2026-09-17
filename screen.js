@@ -5727,7 +5727,6 @@ try {
             _setPanelsForTest(next) { panels = next; },
             sizeCanvases,
             _setWrapForTest(next) { wrap = next; },
-            _getWrapForTest() { return wrap; },
             stopLanShare,
             startLanShare,
             _lanSend,
