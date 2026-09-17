@@ -413,6 +413,38 @@ test('_bestFitLayout picks the smallest layout with room, and caps at six', () =
     assert.equal(_bestFitLayout(7), 'six'); // nothing bigger — caller must truncate
 });
 
+test('deterministic frame coordination waits for a compatible panel without starting a no-op loop', () => {
+    const src = require('node:fs').readFileSync(PLUGIN_PATH, 'utf8');
+    assert.match(src, /let _deterministicFramesActive = false;/);
+    assert.match(src, /_deterministicFramesActive = true;[\s\S]{0,500}!panels\.some\(_canDriveFrames\)/,
+        'coordinator must remain active while waiting for a compatible panel');
+    assert.match(src, /_splitFrameRaf != null \|\| _deterministicFrameTicking \|\| !panels\.some\(_canDriveFrames\)/,
+        'no rAF should be armed until a panel can be driven');
+    const recreate = src.slice(src.indexOf('function recreatePanelHighway'));
+    assert.ok(recreate.indexOf('panel.hw = hw;') < recreate.indexOf('_startDeterministicFrames();'),
+        'a recreated compatible highway must be attached before it retries arming the coordinator');
+});
+
+test('deterministic frame coordination contains panel failures and schedules from finally', () => {
+    const src = require('node:fs').readFileSync(PLUGIN_PATH, 'utf8');
+    const start = src.indexOf('function _startDeterministicFrames()');
+    const end = src.indexOf('function _stopDeterministicFrames()', start);
+    const fn = src.slice(start, end);
+    assert.match(fn, /try \{[\s\S]{0,160}panel\.hw\.renderFrame\(frameTime, frameId\);[\s\S]{0,160}catch \(err\)/);
+    assert.match(fn, /finally \{[\s\S]{0,180}_deterministicFrameTicking = false;[\s\S]{0,180}requestAnimationFrame\(tick\)/);
+});
+
+test('offline export suspends live sync and paints every panel at one chart time', () => {
+    const src = require('node:fs').readFileSync(PLUGIN_PATH, 'utf8');
+    const start = src.indexOf('beginOfflineRender()');
+    const end = src.indexOf('// Identify a panel', start);
+    const api = src.slice(start, end);
+    assert.match(api, /_offlineRenderActive = true;[\s\S]{0,120}_pauseLiveTimeSyncForOfflineRender\(\)/);
+    assert.match(api, /panels\.every\(\(panel\) => panel\.hw && typeof panel\.hw\.renderFrameAt === 'function'\)/);
+    assert.match(api, /for \(const panel of panels\) \{[\s\S]{0,200}panel\.hw\.renderFrameAt\(time\)/);
+    assert.match(api, /_offlineRenderActive = false;[\s\S]{0,120}startTimeSync\(\)/);
+});
+
 // ── Reload idempotency (plugin-runtime-idempotent.v1) ─────────────────────
 // The Host may re-execute screen.js on plugin reload. A second evaluation
 // must not run ANY top-level statement with observable side effects: not
