@@ -1690,7 +1690,7 @@ try {
         // Arrangement/viz switches replace the highway instance while the
         // shared Split Screen frame host may already be running. Hand the new
         // instance to it before its WebSocket can schedule a private rAF.
-        if (_splitFrameRaf != null && typeof hw.setExternalFrameDriver === 'function') {
+        if (_deterministicFramesActive && typeof hw.setExternalFrameDriver === 'function') {
             hw.setExternalFrameDriver(true);
         }
         hw.setInverted(inverted);
@@ -3461,6 +3461,7 @@ try {
     // different wall-clock instant and render in browser-dependent order.
     let _splitFrameRaf = null;
     let _splitFrameId = 0;
+    let _deterministicFramesActive = false;
 
     function _canDriveFrames(panel) {
         return !!(panel && panel.hw
@@ -3469,26 +3470,30 @@ try {
     }
 
     function _startDeterministicFrames() {
-        if (_splitFrameRaf != null) return;
+        if (_deterministicFramesActive || !panels.some(_canDriveFrames)) return;
+        _deterministicFramesActive = true;
         for (const panel of panels) {
             if (_canDriveFrames(panel)) panel.hw.setExternalFrameDriver(true);
         }
         const tick = (frameTime) => {
             _splitFrameRaf = null;
-            if (!active) return;
+            if (!active || !_deterministicFramesActive) return;
             const frameId = ++_splitFrameId;
             // Snapshot the list: a renderer can synchronously trigger a
             // layout change, but that must not make this frame half old and
             // half new.
             for (const panel of panels.slice()) {
-                if (_canDriveFrames(panel)) panel.hw.renderFrame(frameTime, frameId);
+                if (!_canDriveFrames(panel)) continue;
+                try { panel.hw.renderFrame(frameTime, frameId); }
+                catch (err) { console.error('[splitscreen] external frame render failed:', err); }
             }
-            _splitFrameRaf = requestAnimationFrame(tick);
+            if (active && _deterministicFramesActive) _splitFrameRaf = requestAnimationFrame(tick);
         };
         _splitFrameRaf = requestAnimationFrame(tick);
     }
 
     function _stopDeterministicFrames() {
+        _deterministicFramesActive = false;
         if (_splitFrameRaf != null) {
             cancelAnimationFrame(_splitFrameRaf);
             _splitFrameRaf = null;
