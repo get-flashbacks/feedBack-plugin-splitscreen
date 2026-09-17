@@ -5723,6 +5723,7 @@ try {
             LAN_TIME_MIN_INTERVAL_MS,
             LAYOUTS, applyLayoutStyle, _bestFitLayout,
             _setArrangementsForTest(next) { arrangements = next; },
+            _setPanelsForTest(next) { panels = next; },
             stopLanShare,
             startLanShare,
             _lanSend,
@@ -5738,6 +5739,20 @@ try {
             _setActiveForTest(next) { active = next; },
             _installFollowerAudioShim,
             _setFollowerPlayingForTest(next) { _followerPlaying = next; },
+            _getFollowerPlayingForTest() { return _followerPlaying; },
+            _followerBusHandler,
+            _handleFollowerSongChange,
+            _redockPanel,
+            _startPopupBroadcaster,
+            _stopPopupBroadcaster,
+            _setFollowerForTest(next) { FOLLOWER = next; },
+            _setFollowerOrphanedForTest(next) { _followerOrphaned = next; },
+            _getFollowerOrphanedForTest() { return _followerOrphaned; },
+            _setStartingForTest(next) { _starting = next; },
+            _getPendingRedocksForTest() { return _pendingRedocks; },
+            _getPopupsForTest() { return popups; },
+            _getFollowerCurrentTimeForTest() { return _followerCurrentTime; },
+            _getRemoteWaitingShownForTest() { return _remoteWaitingShown; },
         };
     }
 })();
