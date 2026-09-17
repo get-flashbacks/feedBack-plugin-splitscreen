@@ -193,9 +193,49 @@ try {
     let layout = localStorage.getItem('splitscreenLayout') || 'top-bottom';
     let alwaysSplit = localStorage.getItem('splitscreenAlwaysSplit') === 'true';
     let panels = [];       // { hw, canvas, ws, arrIndex, controls }
+    let nextPlayerNumber = 1;
     let wrap = null;
     let currentFilename = null;
     let arrangements = []; // arrangement list from song_info
+
+    function _playerContextApi() {
+        return window.feedBack && window.feedBack.playerContexts;
+    }
+
+    function _panelRole(panel) {
+        if (panel.lyricsMode) return { instrument: 'voice', role: 'karaoke' };
+        const arrangement = arrangements[panel.arrIndex] || {};
+        const value = String(arrangement.type || arrangement.name || '').toLowerCase();
+        if (/bass/.test(value)) return { instrument: 'bass', role: 'bass' };
+        if (/piano|keys|keyboard|synth/.test(value)) return { instrument: 'keys', role: 'instrumental' };
+        if (/drum/.test(value)) return { instrument: 'drums', role: 'instrumental' };
+        return { instrument: 'guitar', role: /rhythm/.test(value) ? 'rhythm' : /lead/.test(value) ? 'lead' : 'instrumental' };
+    }
+
+    function _publishPanelContext(panel) {
+        const api = _playerContextApi();
+        if (!api || typeof api.upsert !== 'function' || !panel) return null;
+        if (!panel.playerId) panel.playerId = `player-${nextPlayerNumber++}`;
+        const role = _panelRole(panel);
+        const arrangement = arrangements[panel.arrIndex] || {};
+        return api.upsert({
+            ...(panel.playerContextOverrides || {}),
+            player_id: panel.playerId,
+            song_id: currentFilename || '',
+            arrangement_id: String(panel.lyricsMode ? 'lyrics'
+                : (arrangement.index ?? arrangement.name ?? panel.arrIndex)),
+            instrument: panel.playerContextOverrides?.instrument || role.instrument,
+            role: panel.playerContextOverrides?.role || role.role,
+            skill: panel.playerContextOverrides?.skill || (panel.lyricsMode ? 'vocal-pitch' : 'overall'),
+        }, panel.hw, 'plugin.splitscreen');
+    }
+
+    function _leavePanelContext(panel) {
+        const api = _playerContextApi();
+        if (api && typeof api.leave === 'function' && panel && panel.playerId) {
+            api.leave(panel.playerId, 'plugin.splitscreen');
+        }
+    }
     let vizPlugins   = []; // {id, name, ...} — type=visualization plugins from /api/plugins
     let _starting    = false; // re-entrancy guard for startSplitScreen
     let _pendingRebuild = false; // rebuildLayout requested while a start is in flight
@@ -696,6 +736,7 @@ try {
             return panels.map((p, i) => ({
                 index: i, name: p.name || ('P' + (i + 1)),
                 canvas: p.canvas, focused: i === focusedPanelIdx, poppedOut: false,
+                player_context: _playerContextApi()?.getActive?.(p.playerId) || null,
             }));
         },
         panelName(i) { return (panels[i] && panels[i].name) || (i != null ? ('P' + (i + 1)) : ''); },
@@ -705,6 +746,16 @@ try {
             panels[i].name = nm;
             if (panels[i].nameInput) panels[i].nameInput.value = nm;
             savePanelPrefs(); _emitPanelsChanged();
+        },
+        setPlayerContext(i, patch) {
+            const panel = panels[i];
+            if (!panel || !patch || typeof patch !== 'object') return null;
+            const allowed = ['profile_id', 'profile_hash', 'profile_ready', 'instrument', 'role', 'skill'];
+            panel.playerContextOverrides = {};
+            for (const key of allowed) {
+                if (patch[key] != null) panel.playerContextOverrides[key] = patch[key];
+            }
+            return _publishPanelContext(panel);
         },
     };
 
@@ -1728,6 +1779,7 @@ try {
         hw.setMastery(mastery);
         hw.resize();
         panel.hw = hw;
+        _publishPanelContext(panel);
         // Make the replacement discoverable before asking the coordinator to
         // arm: _startDeterministicFrames() decides from panels.some(...).
         if (_deterministicFramesActive && typeof hw.setExternalFrameDriver === 'function') {
@@ -1927,6 +1979,7 @@ try {
         const prev = panel.hw._onReady;
         panel.hw._onReady = () => {
             if (prev) prev();
+            _publishPanelContext(panel);
             const has = panel.hw.hasPhraseData();
             panel.masterySlider.disabled = !has;
             panel.masterySlider.style.opacity = has ? '1' : '0.4';
@@ -2033,6 +2086,7 @@ try {
         panel.lyricsMode = true;
         panel.select.value = LYRICS_VALUE;
         panel.arrName.textContent = 'Lyrics';
+        _publishPanelContext(panel);
         savePanelPrefs();
     }
 
@@ -2070,6 +2124,7 @@ try {
         panel.hw.resize();
         panel.arrIndex = arrIndex;
         panel.arrName.textContent = arrangements[arrIndex]?.name || '';
+        _publishPanelContext(panel);
         hookPanelReady(panel);
         panel.hw.connect(getWsUrl(currentFilename, arrIndex), { onSongInfo: () => {} });
         // Restore the per-panel lyrics overlay if it was on before entering
@@ -2533,6 +2588,7 @@ try {
         if (typeof window.createNoteDetector !== 'function') return;
         panel.detector = window.createNoteDetector({
             highway: panel.hw,
+            player_context: _publishPanelContext(panel),
             container: panel.panelDiv,
             channel: DETECT_CHANNEL_VALUE[panel.detectChannel] ?? -1,
             // Phase 2: bind this panel's source to its chosen input DEVICE (0 =
@@ -2826,6 +2882,7 @@ try {
             }
         }
         for (const p of panels) {
+            _leavePanelContext(p);
             if (p.detector) {
                 p.detector.destroy();
                 p.detector = null;
@@ -2850,6 +2907,7 @@ try {
             p.hw.stop();
         }
         panels = [];
+        nextPlayerNumber = 1;
         if (wrap) {
             wrap.remove();
             wrap = null;
