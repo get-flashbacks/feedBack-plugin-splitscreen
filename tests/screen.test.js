@@ -420,8 +420,9 @@ test('deterministic frame coordination waits for a compatible panel without star
         'coordinator must remain active while waiting for a compatible panel');
     assert.match(src, /_splitFrameRaf != null \|\| _deterministicFrameTicking \|\| !panels\.some\(_canDriveFrames\)/,
         'no rAF should be armed until a panel can be driven');
-    assert.match(src, /_startDeterministicFrames\(\);[\s\S]{0,120}\n\s*}\n\s*hw\.setInverted/,
-        'a recreated compatible highway must retry arming the coordinator');
+    const recreate = src.slice(src.indexOf('function recreatePanelHighway'));
+    assert.ok(recreate.indexOf('panel.hw = hw;') < recreate.indexOf('_startDeterministicFrames();'),
+        'a recreated compatible highway must be attached before it retries arming the coordinator');
 });
 
 test('deterministic frame coordination contains panel failures and schedules from finally', () => {
@@ -429,7 +430,7 @@ test('deterministic frame coordination contains panel failures and schedules fro
     const start = src.indexOf('function _startDeterministicFrames()');
     const end = src.indexOf('function _stopDeterministicFrames()', start);
     const fn = src.slice(start, end);
-    assert.match(fn, /try \{ panel\.hw\.renderFrame\(frameTime, frameId\); \}[\s\S]{0,100}catch \(err\)/);
+    assert.match(fn, /try \{[\s\S]{0,160}panel\.hw\.renderFrame\(frameTime, frameId\);[\s\S]{0,160}catch \(err\)/);
     assert.match(fn, /finally \{[\s\S]{0,180}_deterministicFrameTicking = false;[\s\S]{0,180}requestAnimationFrame\(tick\)/);
 });
 
@@ -438,7 +439,8 @@ test('offline export suspends live sync and paints every panel at one chart time
     const start = src.indexOf('beginOfflineRender()');
     const end = src.indexOf('// Identify a panel', start);
     const api = src.slice(start, end);
-    assert.match(api, /_offlineRenderActive = true;[\s\S]{0,120}stopTimeSync\(\)/);
+    assert.match(api, /_offlineRenderActive = true;[\s\S]{0,120}_pauseLiveTimeSyncForOfflineRender\(\)/);
+    assert.match(api, /panels\.every\(\(panel\) => panel\.hw && typeof panel\.hw\.renderFrameAt === 'function'\)/);
     assert.match(api, /for \(const panel of panels\) \{[\s\S]{0,200}panel\.hw\.renderFrameAt\(time\)/);
     assert.match(api, /_offlineRenderActive = false;[\s\S]{0,120}startTimeSync\(\)/);
 });

@@ -623,13 +623,20 @@ try {
         beginOfflineRender() {
             if (!active || _offlineRenderActive) return;
             _offlineRenderActive = true;
-            stopTimeSync();
+            _pauseLiveTimeSyncForOfflineRender();
         },
         renderFrameAt(time) {
             if (!active || !_offlineRenderActive || !Number.isFinite(time)) return false;
+            // Validate before mutating any chart clock so a rebuilding or
+            // incompatible panel cannot leave an export frame half-painted.
+            if (!panels.every((panel) => panel.hw && typeof panel.hw.renderFrameAt === 'function')) return false;
             for (const panel of panels) {
-                if (!panel.hw || typeof panel.hw.renderFrameAt !== 'function') return false;
-                if (panel.hw.renderFrameAt(time) === false) return false;
+                try {
+                    if (panel.hw.renderFrameAt(time) === false) return false;
+                } catch (err) {
+                    console.error('[splitscreen] offline frame render failed:', err);
+                    return false;
+                }
             }
             return true;
         },
@@ -1709,16 +1716,6 @@ try {
             hw.setRenderer(opts.preInstallRenderer);
         }
         hw.init(panel.canvas);
-        // Arrangement/viz switches replace the highway instance while the
-        // shared Split Screen frame host may already be running. Hand the new
-        // instance to it before its WebSocket can schedule a private rAF.
-        if (_deterministicFramesActive && typeof hw.setExternalFrameDriver === 'function') {
-            hw.setExternalFrameDriver(true);
-            // A panel may be recreated after a coordinator found no
-            // compatible panels (or after its last rAF was cancelled). Let
-            // this first compatible replacement arm the shared loop.
-            _startDeterministicFrames();
-        }
         hw.setInverted(inverted);
         hw.setLefty(lefty);
         // Always false: the panel's own DOM lyrics overlay (createLyricsPane)
@@ -1731,6 +1728,12 @@ try {
         hw.setMastery(mastery);
         hw.resize();
         panel.hw = hw;
+        // Make the replacement discoverable before asking the coordinator to
+        // arm: _startDeterministicFrames() decides from panels.some(...).
+        if (_deterministicFramesActive && typeof hw.setExternalFrameDriver === 'function') {
+            hw.setExternalFrameDriver(true);
+            _startDeterministicFrames();
+        }
 
         // toggleDetect() captures `highway: panel.hw` by value when the detector
         // is created — leaving it bound to the just-discarded `old` highway
@@ -3490,6 +3493,7 @@ try {
     let _deterministicFramesActive = false;
     let _deterministicFrameTicking = false;
     let _offlineRenderActive = false;
+    const _frameRenderFailures = new WeakSet();
 
     function _canDriveFrames(panel) {
         return !!(panel && panel.hw
@@ -3519,8 +3523,17 @@ try {
                 // and half new.
                 for (const panel of panels.slice()) {
                     if (!_canDriveFrames(panel)) continue;
-                    try { panel.hw.renderFrame(frameTime, frameId); }
-                    catch (err) { console.error('[splitscreen] external frame render failed:', err); }
+                    try {
+                        panel.hw.renderFrame(frameTime, frameId);
+                        _frameRenderFailures.delete(panel.hw);
+                    } catch (err) {
+                        // A broken renderer must not freeze the other panels,
+                        // but logging its identical failure every rAF would.
+                        if (!_frameRenderFailures.has(panel.hw)) {
+                            _frameRenderFailures.add(panel.hw);
+                            console.error('[splitscreen] external frame render failed:', err);
+                        }
+                    }
                 }
             } finally {
                 _deterministicFrameTicking = false;
@@ -3541,6 +3554,20 @@ try {
         // panel that survives a future host-side handoff schedulable again.
         for (const panel of panels) {
             if (_canDriveFrames(panel)) panel.hw.setExternalFrameDriver(false);
+        }
+    }
+
+    function _pauseLiveTimeSyncForOfflineRender() {
+        if (syncInterval) {
+            clearInterval(syncInterval);
+            syncInterval = null;
+        }
+        // Keep external ownership on each highway. Releasing it here would
+        // let private rAF loops repaint live-clock frames between export ticks.
+        _deterministicFramesActive = false;
+        if (_splitFrameRaf != null) {
+            cancelAnimationFrame(_splitFrameRaf);
+            _splitFrameRaf = null;
         }
     }
 
