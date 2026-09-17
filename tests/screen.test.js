@@ -727,3 +727,407 @@ test('stopLanShare clears a pending reconnect timer so it cannot fire after tear
         global.setTimeout = originalSetTimeout;
     }
 });
+
+// ── LAN share lifecycle beyond stopLanShare (splitscreen#55) ──────────────
+// The teardown branches are covered above; this block reaches the rest of the
+// host-side lifecycle: startLanShare (config capture + connect), _lanSend's
+// ~20 Hz throttling vs the ≤60 Hz BroadcastChannel leg, the hello→config
+// exchange, _maybeResumeLanShare crash-recovery, and Regenerate rotation.
+//
+// A shared const host: the module runs real Node only. startLanShare and
+// _maybeResumeLanShare call _ensureMainBroadcasterAndListener→_ssChannel(),
+// and Node DOES ship a global BroadcastChannel whose live instance would hold
+// the event loop open — so those tests delete the global to route _ssChannel
+// down its null path (mirroring how _nodeTestEnv gates the boot elsewhere).
+
+// FAKE_PANEL flows through _lanCaptureCfg → _captureFollowerConfig: a live
+// panel with per-panel note-detect bindings that must NOT reach viewers.
+const fakePanel = () => ({
+    arrIndex: 2,
+    hw: { getInverted: () => false, getLefty: () => true, getMastery: () => 0.7 },
+    lyricsOverlayOn: true,
+    bar: { style: { display: 'none' } },
+    detectChannel: 'left',
+    detectDeviceName: 'Scarlett',
+    detectVerifierOffsetMs: 40,
+});
+
+test('startLanShare captures the shared cfg with detect stripped, connects to the relay, and persists the share flags', () => {
+    const mod = freshPlugin();
+    const originalBroadcastChannel = global.BroadcastChannel;
+    delete global.BroadcastChannel;   // _ssChannel's null path — see section comment
+    const opened = [];
+    const originalWebSocket = global.WebSocket;
+    global.WebSocket = function (url) {
+        const ws = new FakeWebSocket(0);
+        ws.url = url;
+        opened.push(ws);
+        return ws;
+    };
+    try {
+        assert.equal(mod.startLanShare(fakePanel()), true);
+
+        assert.equal(opened.length, 1, 'must open exactly one relay socket');
+        const share = mod._getLanShareForTest();
+        assert.equal(share.key, localStorage.getItem('splitscreenRoomKey'), 'share key is the ensured room key');
+        assert.equal(opened[0].url, mod.getSyncUrl(share.key));
+        assert.equal(share.ws, opened[0]);
+
+        assert.equal(localStorage.getItem('splitscreenLanShareActive'), 'true');
+        const cfg = JSON.parse(localStorage.getItem('splitscreenLanShareCfg'));
+        assert.equal(cfg.arrangement, 2);
+        assert.equal(cfg.mode, '2d');
+        assert.equal(cfg.inverted, 0);
+        assert.equal(cfg.lefty, 1);
+        assert.equal(cfg.mastery, 0.7);
+        assert.equal(cfg.lyrics, true);
+        assert.equal(cfg.barHidden, true);
+        // Detect fields are force-stripped to inert values — viewers are
+        // passive mirrors and must never inherit the host's mic bindings.
+        assert.equal(cfg.detectChannel, 'mono');
+        assert.equal(cfg.detectDeviceName, '');
+        assert.equal(cfg.detectVerifierOffsetMs, 0);
+    } finally {
+        global.BroadcastChannel = originalBroadcastChannel;
+        global.WebSocket = originalWebSocket;
+    }
+});
+
+test('startLanShare returns false without WebSocket support and touches no share state', () => {
+    const mod = freshPlugin();
+    const originalWebSocket = global.WebSocket;
+    delete global.WebSocket;
+    // _showMainToast enters its try/catch only because this Node has no global
+    // requestAnimationFrame. If one lands, the body proceeds to schedule a
+    // 3.5s removal timer that would call el.remove() on a stub element with
+    // none — stub setTimeout so that path can never become live, whatever
+    // globals the runtime gains.
+    const originalSetTimeout = global.setTimeout;
+    global.setTimeout = () => 0;
+    try {
+        assert.equal(mod.startLanShare(fakePanel()), false);
+        assert.equal(mod._getLanShareForTest(), null);
+        assert.equal(localStorage.getItem('splitscreenLanShareActive'), null);
+        assert.equal(localStorage.getItem('splitscreenLanShareCfg'), null);
+        assert.equal(localStorage.getItem('splitscreenRoomKey'), null);
+    } finally {
+        global.WebSocket = originalWebSocket;
+        global.setTimeout = originalSetTimeout;
+    }
+});
+
+test('_lanSend throttles time frames to LAN_TIME_MIN_INTERVAL_MS and forwards playstate unthrottled', () => {
+    const mod = freshPlugin();
+    const ws = new FakeWebSocket(1); // OPEN
+    mod._setLanShareForTest({ key: 'ABC123', cfg: null, ws, retryTimer: null, backoffMs: 1000 });
+
+    const originalPerformance = global.performance;
+    // performance.now() counts monotonic ms since navigation start. A share
+    // started within its first LAN_TIME_MIN_INTERVAL_MS of page load would
+    // see the first frame dropped (now - 0 < interval) — benign — but the
+    // 10000ms base below models the long-lived-tab norm and keeps that first
+    // send through, matching real usage.
+    let fakeNow = 10000;
+    global.performance = { now: () => fakeNow };
+    try {
+        mod._lanSend({ type: 'time', t: 1 });
+        assert.equal(ws.sent.length, 1);
+
+        fakeNow += mod.LAN_TIME_MIN_INTERVAL_MS - 1;
+        mod._lanSend({ type: 'time', t: 2 });
+        assert.equal(ws.sent.length, 1, 'time frame inside the 50ms window must be dropped');
+
+        fakeNow += 1;   // exactly 50ms after the previous send
+        mod._lanSend({ type: 'time', t: 3 });
+        assert.equal(ws.sent.length, 2, 'time frame sent once the window has elapsed');
+
+        mod._lanSend({ type: 'playstate', playing: true });
+        assert.equal(ws.sent.length, 3, 'playstate is a control message, never throttled');
+        assert.deepEqual(ws.sent.map((s) => JSON.parse(s)), [
+            { type: 'time', t: 1 },
+            { type: 'time', t: 3 },
+            { type: 'playstate', playing: true },
+        ]);
+    } finally {
+        global.performance = originalPerformance;
+    }
+});
+
+test('_lanSend drops every message while the socket is not OPEN', () => {
+    const mod = freshPlugin();
+    const ws = new FakeWebSocket(0); // CONNECTING — send() would throw InvalidStateError
+    mod._setLanShareForTest({ key: 'ABC123', cfg: null, ws, retryTimer: null, backoffMs: 1000 });
+    assert.doesNotThrow(() => mod._lanSend({ type: 'playstate', playing: true }));
+    assert.equal(ws.sent.length, 0);
+});
+
+test('the host answers a viewer hello with a config once a file is loaded, and stays silent before', () => {
+    const mod = freshPlugin();
+    const audio = { currentTime: 12.5, paused: false, addEventListener: () => {} };
+    const originalGetById = global.document.getElementById;
+    global.document.getElementById = (id) => (id === 'audio' ? audio : null);
+
+    const originalBroadcastChannel = global.BroadcastChannel;
+    delete global.BroadcastChannel;
+    const opened = [];
+    const originalWebSocket = global.WebSocket;
+    global.WebSocket = function (url) {
+        const ws = new FakeWebSocket(0);
+        ws.url = url;
+        opened.push(ws);
+        return ws;
+    };
+    const originalSetInterval = global.setInterval;
+    global.setInterval = () => 0;   // the audio element arms the 60Hz broadcaster — must not run for real
+    try {
+        mod._setCurrentFilenameForTest(null); // explicitly: no song loaded yet
+        assert.equal(mod.startLanShare(fakePanel()), true);
+        const ws = opened[0];
+        ws.fireOpen();               // readyState 1 — _lanSend requires it
+
+        ws.onmessage({ data: JSON.stringify({ type: 'hello', popupId: 'lan-abc' }) });
+        assert.equal(ws.sent.length, 0, 'no config before a song is loaded — the viewer must hello-poll');
+
+        mod._setCurrentFilenameForTest('song%20one.sloppak');
+        ws.onmessage({ data: JSON.stringify({ type: 'hello', popupId: 'lan-abc' }) });
+
+        assert.equal(ws.sent.length, 1);
+        const cfg = JSON.parse(ws.sent[0]);
+        assert.equal(cfg.type, 'config');
+        assert.equal(cfg.popupId, 'lan-abc');
+        assert.equal(cfg.filename, 'song%20one.sloppak');
+        assert.equal(cfg.t, 12.5);
+        assert.equal(cfg.playing, true);
+        assert.equal(cfg.cfg.arrangement, 2);
+        assert.equal(cfg.cfg.detectChannel, 'mono', 'the config viewers receive must have detect stripped');
+
+        audio.paused = true;
+        ws.onmessage({ data: JSON.stringify({ type: 'hello', popupId: 'lan-abc' }) });
+        assert.equal(JSON.parse(ws.sent[ws.sent.length - 1]).playing, false,
+            'config must track the host audio pause state');
+
+        // A bare hello without a popupId still gets a (scoped-to-nobody) config.
+        ws.onmessage({ data: JSON.stringify({ type: 'hello' }) });
+        assert.equal(JSON.parse(ws.sent[ws.sent.length - 1]).popupId, '');
+
+        assert.doesNotThrow(() => ws.onmessage({ data: 'not-json{' }));
+        assert.equal(ws.sent.length, 3, 'garbage frames must be ignored, not sent or thrown');
+    } finally {
+        global.document.getElementById = originalGetById;
+        global.BroadcastChannel = originalBroadcastChannel;
+        global.WebSocket = originalWebSocket;
+        global.setInterval = originalSetInterval;
+    }
+});
+
+test('the 60Hz broadcaster posts every time frame locally while the LAN leg is throttled to ~20Hz', () => {
+    const mod = freshPlugin();
+
+    const posted = [];
+    const originalBroadcastChannel = global.BroadcastChannel;
+    global.BroadcastChannel = function () {};
+    global.BroadcastChannel.prototype.postMessage = function (msg) { posted.push(msg); };
+    global.BroadcastChannel.prototype.close = function () {};
+
+    const originalGetById = global.document.getElementById;
+    let t = 0;
+    const audio = { get currentTime() { return t; }, paused: false, addEventListener: () => {} };
+    global.document.getElementById = (id) => (id === 'audio' ? audio : null);
+
+    let intervalCb = null;
+    const originalSetInterval = global.setInterval;
+    global.setInterval = (cb) => { intervalCb = cb; return 12345; };
+
+    const opened = [];
+    const originalWebSocket = global.WebSocket;
+    global.WebSocket = function (url) {
+        const ws = new FakeWebSocket(0);
+        ws.url = url;
+        opened.push(ws);
+        return ws;
+    };
+
+    const originalPerformance = global.performance;
+    // Long-lived-tab base (see the _lanSend throttle test): fakeNow sits far
+    // above `_lanLastTimeSentPerf`'s 0 initializer, so the very first frame
+    // goes through and the gate only starts pushing frames out from the
+    // second send onward.
+    let fakeNow = 10000;
+    global.performance = { now: () => fakeNow };
+
+    try {
+        // A live popup keeps the local BroadcastChannel leg posting every
+        // tick; the relay leg is the one LAN_TIME_MIN_INTERVAL_MS gates.
+        mod._setPopupsForTest([['p1', { popup: { closed: false } }]]);
+        assert.equal(mod.startLanShare(null), true);
+        opened[0].fireOpen();
+
+        for (let i = 0; i < 10; i++) {
+            t += 0.02;
+            fakeNow += 16;    // ~62Hz ticks
+            intervalCb();
+        }
+
+        const lanTimes = opened[0].sent.map((s) => JSON.parse(s)).filter((m) => m.type === 'time');
+        assert.equal(posted.length, 10, 'every tick reaches the local BroadcastChannel');
+        // Ticks land at 10016, 10032, …, 10160ms; first send @10016, then
+        // every tick ≥50ms after the last → 10080 and 10144. 3 LAN frames.
+        assert.equal(lanTimes.length, 3, 'the relay sees only frames ≥50ms apart');
+    } finally {
+        global.BroadcastChannel = originalBroadcastChannel;
+        global.document.getElementById = originalGetById;
+        global.setInterval = originalSetInterval;
+        global.WebSocket = originalWebSocket;
+        global.performance = originalPerformance;
+    }
+});
+
+// ── _maybeResumeLanShare (crash/reload recovery) ─────────────────────────────
+test('_maybeResumeLanShare re-arms a share from persisted flags and reconnects on the saved key', () => {
+    const mod = freshPlugin();
+    localStorage.setItem('splitscreenLanShareActive', 'true');
+    localStorage.setItem('splitscreenLanShareCfg', JSON.stringify({ arrangement: 3, mode: 'viz:highway_3d', detectChannel: 'left' }));
+
+    const originalBroadcastChannel = global.BroadcastChannel;
+    delete global.BroadcastChannel;
+    const opened = [];
+    const originalWebSocket = global.WebSocket;
+    global.WebSocket = function (url) {
+        const ws = new FakeWebSocket(0);
+        ws.url = url;
+        opened.push(ws);
+        return ws;
+    };
+    try {
+        mod._maybeResumeLanShare();
+        const share = mod._getLanShareForTest();
+        assert.ok(share, 'must re-arm the share');
+        assert.equal(opened.length, 1);
+        assert.equal(share.ws, opened[0]);
+        assert.match(opened[0].url, /\/ws\/sync\/[A-Z0-9]{6}$/, 'reconnect uses the persisted room key');
+        assert.deepEqual(share.cfg, { arrangement: 3, mode: 'viz:highway_3d', detectChannel: 'left' });
+    } finally {
+        global.BroadcastChannel = originalBroadcastChannel;
+        global.WebSocket = originalWebSocket;
+    }
+});
+
+test('_maybeResumeLanShare tolerates a corrupt persisted cfg and still re-arms', () => {
+    const mod = freshPlugin();
+    localStorage.setItem('splitscreenLanShareActive', 'true');
+    localStorage.setItem('splitscreenLanShareCfg', '{not json');
+    const originalBroadcastChannel = global.BroadcastChannel;
+    delete global.BroadcastChannel;
+    const originalWebSocket = global.WebSocket;
+    global.WebSocket = function () { return new FakeWebSocket(0); };
+    try {
+        mod._maybeResumeLanShare();
+        const share = mod._getLanShareForTest();
+        assert.ok(share, 'an unparseable cfg must not stop the recovery');
+        assert.equal(share.cfg, null, 'the unparseable cfg falls back to null');
+    } finally {
+        global.BroadcastChannel = originalBroadcastChannel;
+        global.WebSocket = originalWebSocket;
+    }
+});
+
+test('_maybeResumeLanShare does nothing without the persisted active flag', () => {
+    const mod = freshPlugin();
+    mod._maybeResumeLanShare();
+    assert.equal(mod._getLanShareForTest(), null);
+});
+
+test('_maybeResumeLanShare does not clobber an already-running share', () => {
+    const mod = freshPlugin();
+    localStorage.setItem('splitscreenLanShareActive', 'true');
+    const ws = new FakeWebSocket(1);
+    mod._setLanShareForTest({ key: 'K7TR4M', cfg: null, ws, retryTimer: null, backoffMs: 1000 });
+
+    mod._maybeResumeLanShare();
+
+    assert.equal(mod._getLanShareForTest().ws, ws, 'the live socket must be untouched');
+});
+
+test('_maybeResumeLanShare does nothing without WebSocket support', () => {
+    const mod = freshPlugin();
+    localStorage.setItem('splitscreenLanShareActive', 'true');
+    const originalWebSocket = global.WebSocket;
+    delete global.WebSocket;
+    try {
+        mod._maybeResumeLanShare();
+        assert.equal(mod._getLanShareForTest(), null);
+    } finally {
+        global.WebSocket = originalWebSocket;
+    }
+});
+
+// ── Room-key Regenerate rotation ─────────────────────────────────────────────
+// The settings-sync block wires the Regenerate handler during screen.js's
+// evaluation, so the stub elements must be in place BEFORE the module loads.
+// freshPlugin() builds a fresh document per call, so a post-hoc override is
+// invisible to the load — build the stub by hand instead (same pattern as the
+// reload-idempotency test).
+function loadPluginWithRoomKeyElements() {
+    const location = { search: '', host: 'localhost:8420', protocol: 'http:' };
+    global.window = { location, addEventListener: noop };
+    global.document = makeDocumentStub();
+    const captured = { regenHandler: null };
+    const roomKeyEl = { textContent: '' };
+    global.document.getElementById = (id) => {
+        switch (id) {
+            case 'splitscreen-room-key':
+                return roomKeyEl;
+            case 'splitscreen-room-key-regen':
+                return { addEventListener: (ev, cb) => { if (ev === 'click') captured.regenHandler = cb; } };
+            default:
+                return null;
+        }
+    };
+    global.localStorage = makeLocalStorage();
+    global.location = location;
+    return { mod: loadPlugin(), roomKeyEl, getRegenHandler: () => captured.regenHandler };
+}
+
+test('Regenerate rotates the stored key and stops a live share with share-ended', () => {
+    const { mod, roomKeyEl, getRegenHandler } = loadPluginWithRoomKeyElements();
+
+    const oldKey = mod.ensureRoomKey();
+    assert.ok(mod.normalizeRoomKey(oldKey));
+    assert.equal(roomKeyEl.textContent, oldKey, 'the key display shows the ensured key');
+
+    const ws = new FakeWebSocket(1);
+    mod._setLanShareForTest({ key: oldKey, cfg: null, ws, retryTimer: null, backoffMs: 1000 });
+    localStorage.setItem('splitscreenLanShareActive', 'true');
+
+    assert.equal(typeof getRegenHandler(), 'function', 'Regenerate must be wired when the elements exist');
+    // The handler calls _showMainToast (stopping a live share) — same
+    // future-rAF robustness stub as the startLanShare no-WebSocket test.
+    const originalSetTimeout = global.setTimeout;
+    global.setTimeout = () => 0;
+    try {
+        assert.doesNotThrow(() => getRegenHandler()());
+
+        const newKey = localStorage.getItem('splitscreenRoomKey');
+        assert.ok(mod.normalizeRoomKey(newKey), 'rotated key must be valid');
+        assert.notEqual(newKey, oldKey, 'the key must actually rotate');
+        assert.equal(roomKeyEl.textContent, newKey, 'the display must follow the stored key');
+        assert.equal(mod._getLanShareForTest(), null, 'any live share must be stopped');
+        assert.deepEqual(ws.sent.map((s) => JSON.parse(s)), [{ type: 'share-ended' }], 'the terminal goodbye must be delivered');
+        assert.equal(localStorage.getItem('splitscreenLanShareActive'), null);
+    } finally {
+        global.setTimeout = originalSetTimeout;
+    }
+});
+
+test('Regenerate rotates the stored key even when no share is active', () => {
+    const { mod, roomKeyEl, getRegenHandler } = loadPluginWithRoomKeyElements();
+
+    const oldKey = mod.ensureRoomKey();
+    getRegenHandler()();
+
+    const newKey = localStorage.getItem('splitscreenRoomKey');
+    assert.notEqual(newKey, oldKey);
+    assert.ok(mod.normalizeRoomKey(newKey));
+    assert.equal(roomKeyEl.textContent, newKey);
+    assert.equal(mod._getLanShareForTest(), null);
+});
