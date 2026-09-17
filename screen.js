@@ -617,6 +617,28 @@ try {
         // to the single-instance main-player path when the user isn't split.
         isActive() { return active; },
 
+        // Offline exporters supply each chart timestamp themselves. Suspend
+        // the live audio-clock loop for that short render pass so all panels
+        // paint the same requested instant, then restore it in endOfflineRender.
+        beginOfflineRender() {
+            if (!active || _offlineRenderActive) return;
+            _offlineRenderActive = true;
+            stopTimeSync();
+        },
+        renderFrameAt(time) {
+            if (!active || !_offlineRenderActive || !Number.isFinite(time)) return false;
+            for (const panel of panels) {
+                if (!panel.hw || typeof panel.hw.renderFrameAt !== 'function') return false;
+                if (panel.hw.renderFrameAt(time) === false) return false;
+            }
+            return true;
+        },
+        endOfflineRender() {
+            if (!_offlineRenderActive) return;
+            _offlineRenderActive = false;
+            if (active) startTimeSync();
+        },
+
         // Identify a panel by the highway canvas its renderer received in init().
         panelIndexFor(canvas) {
             if (!active) return null;
@@ -3467,6 +3489,7 @@ try {
     let _splitFrameId = 0;
     let _deterministicFramesActive = false;
     let _deterministicFrameTicking = false;
+    let _offlineRenderActive = false;
 
     function _canDriveFrames(panel) {
         return !!(panel && panel.hw

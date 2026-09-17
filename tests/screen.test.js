@@ -433,6 +433,16 @@ test('deterministic frame coordination contains panel failures and schedules fro
     assert.match(fn, /finally \{[\s\S]{0,180}_deterministicFrameTicking = false;[\s\S]{0,180}requestAnimationFrame\(tick\)/);
 });
 
+test('offline export suspends live sync and paints every panel at one chart time', () => {
+    const src = require('node:fs').readFileSync(PLUGIN_PATH, 'utf8');
+    const start = src.indexOf('beginOfflineRender()');
+    const end = src.indexOf('// Identify a panel', start);
+    const api = src.slice(start, end);
+    assert.match(api, /_offlineRenderActive = true;[\s\S]{0,120}stopTimeSync\(\)/);
+    assert.match(api, /for \(const panel of panels\) \{[\s\S]{0,200}panel\.hw\.renderFrameAt\(time\)/);
+    assert.match(api, /_offlineRenderActive = false;[\s\S]{0,120}startTimeSync\(\)/);
+});
+
 // ── Reload idempotency (plugin-runtime-idempotent.v1) ─────────────────────
 // The Host may re-execute screen.js on plugin reload. A second evaluation
 // must not run ANY top-level statement with observable side effects: not
