@@ -1220,15 +1220,14 @@ test('_followerBusHandler share-ended on a local popup is a no-op (only meaningf
 test('_followerBusHandler song-changed triggers a rebuild only when the filename actually differs', () => {
     const mod = freshPlugin();
     mod._setCurrentFilenameForTest('a.sloppak');
-    // Force the rebuild path to bail out early (no song is loaded) so this
-    // test observes only whether the single-flight guard was entered, not
-    // the full async rebuild (which needs a real `highway`/WS stack).
-    mod._followerBusHandler({ type: 'song-changed', filename: 'a.sloppak' });
+    mod._setFollowerPlayingForTest(true);
     // Same filename as currentFilename — _followerBusHandler's own guard
-    // must skip calling _handleFollowerSongChange entirely.
-    // (No observable side effect to assert here beyond "did not throw" —
-    // covered explicitly by the single-flight test below.)
-    assert.doesNotThrow(() => {});
+    // must skip calling _handleFollowerSongChange entirely. If it regressed,
+    // the rebuild would flip `_followerPlaying` to false synchronously (its
+    // first side effect), so asserting it stays true pins the skip.
+    mod._followerBusHandler({ type: 'song-changed', filename: 'a.sloppak' });
+    assert.equal(mod._getFollowerPlayingForTest(), true,
+        'same-filename song-changed must not enter the rebuild path');
 });
 
 // ── _handleFollowerSongChange single-flight guard ───────────────────────────
@@ -1238,10 +1237,13 @@ test('_followerBusHandler song-changed triggers a rebuild only when the filename
 test('_handleFollowerSongChange does nothing once the follower is orphaned', async () => {
     const mod = freshPlugin();
     mod._setFollowerOrphanedForTest(true);
-    // Would throw reaching into teardownPanels/loadSongInFollower innards if
-    // it proceeded past the orphaned guard — reaching here without a thrown
-    // error confirms the early return fired.
+    mod._setFollowerPlayingForTest(true);
+    // The rebuild's first side effect is `_followerPlaying = false` (before
+    // any await, so it lands even if loadSongInFollower's internal errors are
+    // swallowed). Asserting it stays true pins the orphaned early return.
     await mod._handleFollowerSongChange('new.sloppak');
+    assert.equal(mod._getFollowerPlayingForTest(), true,
+        'an orphaned follower must not enter the rebuild path');
 });
 
 // ── _redockPanel deferral while a start is in flight ────────────────────────
