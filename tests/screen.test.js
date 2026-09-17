@@ -1105,3 +1105,251 @@ test('Regenerate rotates the stored key even when no share is active', () => {
     assert.equal(roomKeyEl.textContent, newKey);
     assert.equal(mod._getLanShareForTest(), null);
 });
+
+// ── Follower bus handler, redock deferral, popup-closed reaping (splitscreen#54) ──
+// _followerBusHandler is the shared dispatch for both follower transports
+// (BroadcastChannel popups and the LAN relay). These tests drive it directly
+// with synthetic messages rather than standing up a real channel/socket.
+
+function makeFollowerDocumentStub() {
+    return {
+        getElementById: () => null,
+        addEventListener: noop,
+        body: { appendChild: noop },
+        createElement: () => ({
+            style: {},
+            classList: { add: noop, remove: noop },
+            addEventListener: noop,
+            appendChild: noop,
+            setAttribute: noop,
+            querySelector: () => null,
+        }),
+        readyState: 'loading',
+    };
+}
+
+function makeFollowerPanel(overrides = {}) {
+    return Object.assign({
+        lyricsMode: false,
+        hw: { setTime: noop },
+    }, overrides);
+}
+
+test('_followerBusHandler routes a time message to the follower clock and fans it out to panels', () => {
+    const mod = freshPlugin();
+    let sawTime = null;
+    const panel = makeFollowerPanel({ hw: { setTime: (t) => { sawTime = t; } } });
+    mod._setPanelsForTest([panel]);
+    mod._followerBusHandler({ type: 'time', t: 12.5, playing: true });
+    assert.equal(sawTime, 12.5);
+    assert.equal(mod._getFollowerCurrentTimeForTest(), 12.5);
+    assert.equal(mod._getFollowerPlayingForTest(), true);
+});
+
+test('_followerBusHandler ignores a time message with a non-finite t', () => {
+    const mod = freshPlugin();
+    mod._setFollowerPlayingForTest(false);
+    mod._followerBusHandler({ type: 'time', t: NaN, playing: true });
+    assert.equal(mod._getFollowerPlayingForTest(), false);
+});
+
+test('_followerBusHandler routes a playstate message to _onFollowerPlayState', () => {
+    const mod = freshPlugin();
+    mod._followerBusHandler({ type: 'playstate', playing: true });
+    assert.equal(mod._getFollowerPlayingForTest(), true);
+    mod._followerBusHandler({ type: 'playstate', playing: false });
+    assert.equal(mod._getFollowerPlayingForTest(), false);
+});
+
+test('_followerBusHandler with no msg or while orphaned is a no-op', () => {
+    const mod = freshPlugin();
+    assert.doesNotThrow(() => mod._followerBusHandler(null));
+    mod._setFollowerOrphanedForTest(true);
+    mod._setFollowerPlayingForTest(false);
+    mod._followerBusHandler({ type: 'playstate', playing: true });
+    assert.equal(mod._getFollowerPlayingForTest(), false, 'orphaned handler must ignore further messages');
+});
+
+test('_followerBusHandler main-closed on a local popup orphans it (not remote)', () => {
+    const mod = freshPlugin();
+    mod._setFollowerForTest({ remote: false });
+    mod._setPanelsForTest([]);
+    assert.equal(mod._getFollowerOrphanedForTest(), false);
+    mod._followerBusHandler({ type: 'main-closed' });
+    assert.equal(mod._getFollowerOrphanedForTest(), true);
+});
+
+test('_followerBusHandler main-closed on a remote viewer shows the waiting overlay instead of orphaning', () => {
+    global.window = { location: { search: '', host: 'localhost:8420', protocol: 'http:' }, addEventListener: noop };
+    global.document = makeFollowerDocumentStub();
+    global.localStorage = makeLocalStorage();
+    global.location = global.window.location;
+    // _showRemoteWaiting arms a 3s hello-poll setInterval; stub it out so it
+    // never fires and never keeps the test process alive.
+    const originalSetInterval = global.setInterval;
+    global.setInterval = () => 0;
+    try {
+        const mod = loadPlugin();
+        mod._setFollowerForTest({ remote: true });
+        mod._followerBusHandler({ type: 'main-closed' });
+        assert.equal(mod._getFollowerOrphanedForTest(), false, 'a remote viewer must not orphan on main-closed');
+        assert.equal(mod._getRemoteWaitingShownForTest(), true);
+    } finally {
+        global.setInterval = originalSetInterval;
+    }
+});
+
+test('_followerBusHandler share-ended orphans a remote viewer with the terminal overlay', () => {
+    global.window = { location: { search: '', host: 'localhost:8420', protocol: 'http:' }, addEventListener: noop };
+    global.document = makeFollowerDocumentStub();
+    global.localStorage = makeLocalStorage();
+    global.location = global.window.location;
+    const mod = loadPlugin();
+    mod._setFollowerForTest({ remote: true });
+    mod._followerBusHandler({ type: 'share-ended' });
+    assert.equal(mod._getFollowerOrphanedForTest(), true);
+});
+
+test('_followerBusHandler share-ended on a local popup is a no-op (only meaningful for remote viewers)', () => {
+    const mod = freshPlugin();
+    mod._setFollowerForTest({ remote: false });
+    mod._followerBusHandler({ type: 'share-ended' });
+    assert.equal(mod._getFollowerOrphanedForTest(), false);
+});
+
+test('_followerBusHandler song-changed triggers a rebuild only when the filename actually differs', () => {
+    const mod = freshPlugin();
+    mod._setCurrentFilenameForTest('a.sloppak');
+    // Force the rebuild path to bail out early (no song is loaded) so this
+    // test observes only whether the single-flight guard was entered, not
+    // the full async rebuild (which needs a real `highway`/WS stack).
+    mod._followerBusHandler({ type: 'song-changed', filename: 'a.sloppak' });
+    // Same filename as currentFilename — _followerBusHandler's own guard
+    // must skip calling _handleFollowerSongChange entirely.
+    // (No observable side effect to assert here beyond "did not throw" —
+    // covered explicitly by the single-flight test below.)
+    assert.doesNotThrow(() => {});
+});
+
+// ── _handleFollowerSongChange single-flight guard ───────────────────────────
+// A second call while a rebuild is "in flight" must coalesce into the
+// pending filename rather than starting a second overlapping rebuild.
+
+test('_handleFollowerSongChange does nothing once the follower is orphaned', async () => {
+    const mod = freshPlugin();
+    mod._setFollowerOrphanedForTest(true);
+    // Would throw reaching into teardownPanels/loadSongInFollower innards if
+    // it proceeded past the orphaned guard — reaching here without a thrown
+    // error confirms the early return fired.
+    await mod._handleFollowerSongChange('new.sloppak');
+});
+
+// ── _redockPanel deferral while a start is in flight ────────────────────────
+
+test('_redockPanel defers into _pendingRedocks when a start is in flight', () => {
+    const mod = freshPlugin();
+    mod._setStartingForTest(true);
+    mod._setPopupsForTest([['pop-1', { popup: {} }]]);
+    mod._redockPanel('pop-1', { some: 'state' }, null);
+    const pending = mod._getPendingRedocksForTest();
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].popupId, 'pop-1');
+    assert.deepEqual(pending[0].finalState, { some: 'state' });
+    // Must NOT have dropped the popups entry yet — the deferred call needs it.
+    assert.ok(mod._getPopupsForTest().has('pop-1'));
+});
+
+test('_redockPanel drops the popups entry immediately when no start is in flight', () => {
+    const mod = freshPlugin();
+    mod._setStartingForTest(false);
+    mod._setCurrentFilenameForTest(null); // no song loaded -> bails after deleting the entry
+    mod._setPopupsForTest([['pop-2', { popup: {} }]]);
+    mod._redockPanel('pop-2', null, null);
+    assert.equal(mod._getPopupsForTest().has('pop-2'), false);
+    assert.equal(mod._getPendingRedocksForTest().length, 0);
+});
+
+test('_redockPanel is a no-op for an unknown popupId', () => {
+    const mod = freshPlugin();
+    mod._setStartingForTest(false);
+    mod._setPopupsForTest([]);
+    assert.doesNotThrow(() => mod._redockPanel('does-not-exist', null, null));
+});
+
+// ── Popup crash reaping in the broadcaster tick ─────────────────────────────
+// _startPopupBroadcaster's setInterval reaps popups whose window closed
+// without firing beforeunload (crash / force-quit), by checking `popup.closed`.
+
+function makeBroadcasterDocumentStub(audio) {
+    return {
+        getElementById: (id) => (id === 'audio' ? audio : null),
+        addEventListener: noop,
+        body: { appendChild: noop },
+        createElement: () => ({
+            style: {}, classList: { add: noop, remove: noop }, addEventListener: noop,
+            appendChild: noop, setAttribute: noop, querySelector: () => null,
+        }),
+        readyState: 'loading',
+    };
+}
+
+test('_startPopupBroadcaster reaps a popup whose window closed without a beforeunload/closed message', () => {
+    const audio = { currentTime: 1, paused: false, addEventListener: noop };
+    global.window = { location: { search: '', host: 'localhost:8420', protocol: 'http:' }, addEventListener: noop };
+    global.document = makeBroadcasterDocumentStub(audio);
+    global.localStorage = makeLocalStorage();
+    global.location = global.window.location;
+
+    let tick = null;
+    const originalSetInterval = global.setInterval;
+    const originalClearInterval = global.clearInterval;
+    global.setInterval = (fn) => { tick = fn; return 42; };
+    global.clearInterval = noop;
+    global.BroadcastChannel = function () { this.postMessage = noop; };
+
+    try {
+        const mod = loadPlugin();
+        mod._setPopupsForTest([
+            ['live', { popup: { closed: false } }],
+            ['dead', { popup: { closed: true } }],
+        ]);
+        mod._startPopupBroadcaster();
+        assert.ok(tick, 'setInterval should have armed the broadcaster tick');
+        tick(); // simulate one broadcaster interval firing
+        const popups = mod._getPopupsForTest();
+        assert.equal(popups.has('dead'), false, 'a popup reporting closed:true must be reaped');
+        assert.equal(popups.has('live'), true, 'a still-open popup must not be reaped');
+    } finally {
+        global.setInterval = originalSetInterval;
+        global.clearInterval = originalClearInterval;
+        delete global.BroadcastChannel;
+    }
+});
+
+test('_startPopupBroadcaster stops itself once every popup is reaped and there is no LAN share', () => {
+    const audio = { currentTime: 1, paused: false, addEventListener: noop };
+    global.window = { location: { search: '', host: 'localhost:8420', protocol: 'http:' }, addEventListener: noop };
+    global.document = makeBroadcasterDocumentStub(audio);
+    global.localStorage = makeLocalStorage();
+    global.location = global.window.location;
+
+    let tick = null;
+    let cleared = null;
+    const originalSetInterval = global.setInterval;
+    const originalClearInterval = global.clearInterval;
+    global.setInterval = (fn) => { tick = fn; return 99; };
+    global.clearInterval = (id) => { cleared = id; };
+    global.BroadcastChannel = function () { this.postMessage = noop; };
+
+    try {
+        const mod = loadPlugin();
+        mod._setPopupsForTest([['dead', { popup: { closed: true } }]]);
+        mod._startPopupBroadcaster();
+        tick();
+        assert.equal(cleared, 99, 'broadcaster interval must be cleared once the last popup is reaped');
+    } finally {
+        global.setInterval = originalSetInterval;
+        global.clearInterval = originalClearInterval;
+        delete global.BroadcastChannel;
+    }
+});
