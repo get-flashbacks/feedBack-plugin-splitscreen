@@ -1687,6 +1687,12 @@ try {
             hw.setRenderer(opts.preInstallRenderer);
         }
         hw.init(panel.canvas);
+        // Arrangement/viz switches replace the highway instance while the
+        // shared Split Screen frame host may already be running. Hand the new
+        // instance to it before its WebSocket can schedule a private rAF.
+        if (_splitFrameRaf != null && typeof hw.setExternalFrameDriver === 'function') {
+            hw.setExternalFrameDriver(true);
+        }
         hw.setInverted(inverted);
         hw.setLefty(lefty);
         // Always false: the panel's own DOM lyrics overlay (createLyricsPane)
@@ -3450,6 +3456,50 @@ try {
 
     // ── Time sync ──
     let syncInterval = null;
+    // One rAF owns every panel frame. Without this each createHighway()
+    // instance schedules independently, so same-layout panels can sample a
+    // different wall-clock instant and render in browser-dependent order.
+    let _splitFrameRaf = null;
+    let _splitFrameId = 0;
+
+    function _canDriveFrames(panel) {
+        return !!(panel && panel.hw
+            && typeof panel.hw.setExternalFrameDriver === 'function'
+            && typeof panel.hw.renderFrame === 'function');
+    }
+
+    function _startDeterministicFrames() {
+        if (_splitFrameRaf != null) return;
+        for (const panel of panels) {
+            if (_canDriveFrames(panel)) panel.hw.setExternalFrameDriver(true);
+        }
+        const tick = (frameTime) => {
+            _splitFrameRaf = null;
+            if (!active) return;
+            const frameId = ++_splitFrameId;
+            // Snapshot the list: a renderer can synchronously trigger a
+            // layout change, but that must not make this frame half old and
+            // half new.
+            for (const panel of panels.slice()) {
+                if (_canDriveFrames(panel)) panel.hw.renderFrame(frameTime, frameId);
+            }
+            _splitFrameRaf = requestAnimationFrame(tick);
+        };
+        _splitFrameRaf = requestAnimationFrame(tick);
+    }
+
+    function _stopDeterministicFrames() {
+        if (_splitFrameRaf != null) {
+            cancelAnimationFrame(_splitFrameRaf);
+            _splitFrameRaf = null;
+        }
+        // Restore normal host ownership before stopping/replacing a panel.
+        // This is harmless on an interrupted layout rebuild, and makes a
+        // panel that survives a future host-side handoff schedulable again.
+        for (const panel of panels) {
+            if (_canDriveFrames(panel)) panel.hw.setExternalFrameDriver(false);
+        }
+    }
 
     /**
      * Start Time Sync.
@@ -3464,12 +3514,14 @@ try {
                 if (!p.lyricsMode) p.hw.setTime(t);
             }
         }, 1000 / 60);
+        _startDeterministicFrames();
     }
 
     /**
      * Stop Time Sync.
      */
     function stopTimeSync() {
+        _stopDeterministicFrames();
         if (syncInterval) {
             clearInterval(syncInterval);
             syncInterval = null;
