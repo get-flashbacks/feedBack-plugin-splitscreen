@@ -2060,17 +2060,12 @@ function makeCanvasStub() {
     };
 }
 
-function freshVizLifecyclePlugin() {
-    const mod = freshVizPlugin();
-    return mod;
-}
-
 test('recreatePanelHighway stops the old highway before the replacement is created and installed', () => {
     // Codex review finding on PR #61: checking final state alone (stopped ===
     // true, panel.hw === newHw) doesn't pin WHEN stop() happens — moving it
     // to just before hw.init() left both assertions green. Record an
     // operation log instead and assert 'stop' precedes every replacement step.
-    const mod = freshVizLifecyclePlugin();
+    const mod = freshVizPlugin();
     const ops = [];
     const oldHw = makeFakeHighway({ stop() { ops.push('old.stop'); } });
     let newHw;
@@ -2102,7 +2097,7 @@ test('recreatePanelHighway replaces the canvas element and initializes the NEW h
     // the DOM element but still initialized against the detached oldCanvas
     // (leaving the highway attached to a context-locked, unrendered element)
     // passed unchanged.
-    const mod = freshVizLifecyclePlugin();
+    const mod = freshVizPlugin();
     let initedWith = null;
     global.createHighway = () => makeFakeHighway({ init: (c) => { initedWith = c; } });
     const oldCanvas = makeCanvasStub();
@@ -2123,7 +2118,7 @@ test('recreatePanelHighway replaces the canvas element and initializes the NEW h
 });
 
 test('recreatePanelHighway transfers inverted/lefty/mastery from the old highway to the new one', () => {
-    const mod = freshVizLifecyclePlugin();
+    const mod = freshVizPlugin();
     const oldHw = makeFakeHighway({ getInverted: () => true, getLefty: () => true, getMastery: () => 0.75 });
     let seenInverted = null, seenLefty = null, seenMastery = null;
     const newHw = makeFakeHighway({
@@ -2148,7 +2143,7 @@ test('recreatePanelHighway transfers inverted/lefty/mastery from the old highway
 });
 
 test('recreatePanelHighway pre-installs a supplied renderer before init (context-type lock)', () => {
-    const mod = freshVizLifecyclePlugin();
+    const mod = freshVizPlugin();
     const order = [];
     const newHw = makeFakeHighway({
         setRenderer: (r) => { order.push('setRenderer:' + r); },
@@ -2170,7 +2165,7 @@ test('recreatePanelHighway pre-installs a supplied renderer before init (context
 });
 
 test('recreatePanelHighway does not call setRenderer when no renderer is supplied', () => {
-    const mod = freshVizLifecyclePlugin();
+    const mod = freshVizPlugin();
     let setRendererCalled = false;
     const newHw = makeFakeHighway({ setRenderer: () => { setRendererCalled = true; } });
     global.createHighway = () => newHw;
@@ -2188,7 +2183,7 @@ test('recreatePanelHighway does not call setRenderer when no renderer is supplie
 });
 
 test('recreatePanelHighway always turns off the highway-native lyrics flag (the panel-owned overlay is the single lyrics display)', () => {
-    const mod = freshVizLifecyclePlugin();
+    const mod = freshVizPlugin();
     let seenLyricsVisible = 'unset';
     const newHw = makeFakeHighway({ setLyricsVisible: (v) => { seenLyricsVisible = v; } });
     global.createHighway = () => newHw;
