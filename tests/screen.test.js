@@ -1355,3 +1355,420 @@ test('_startPopupBroadcaster stops itself once every popup is reaped and there i
         delete global.BroadcastChannel;
     }
 });
+
+// ── Per-panel viz controls persistence (_vizPanelGet/_vizPanelSet) ───────────
+// splitscreen#56: test coverage for the per-panel localStorage key scheme
+// (h3d_bg_panel<N>_<key>), the global fallback (h3d_bg_<key>), the re-fire
+// of window.h3dBgSet<Key> on every write, and getPanelControlsFor +
+// buildVizPopover descriptor resolution.
+
+// buildVizPopover exercises real DOM mutation (createElement/appendChild/
+// style.cssText/textContent/checked/etc.), so it needs a richer document
+// stub than makeDocumentStub()'s inert no-op element. This helper builds
+// elements that record their created children and honor the property writes
+// buildVizPopover performs — enough to assert the control types and to fire
+// the onchange/oninput handlers that drive the round-trip into localStorage.
+function makeVizElementStub(tag) {
+    const el = {
+        tagName: tag.toUpperCase(),
+        style: {},
+        classList: { add: noop, remove: noop },
+        addEventListener: noop,
+        appendChild: (child) => { el.children.push(child); },
+        setAttribute: noop,
+        textContent: '',
+        value: '',
+        checked: false,
+        min: '',
+        max: '',
+        step: '',
+        type: tag === 'input' ? 'text' : '',
+        onchange: null,
+        oninput: null,
+        innerHTML: '',
+        dataset: {},
+        closest: () => null,
+        children: [],
+    };
+    return el;
+}
+function makeVizDocumentStub() {
+    return {
+        getElementById: () => null,
+        addEventListener: noop,
+        body: { appendChild: noop },
+        createElement: (tag) => makeVizElementStub(tag),
+        readyState: 'loading',
+    };
+}
+function freshVizPlugin({ search = '', protocol = 'http:' } = {}) {
+    const location = { search, host: 'localhost:8420', protocol };
+    global.window = { location, addEventListener: noop };
+    global.document = makeVizDocumentStub();
+    global.localStorage = makeLocalStorage();
+    global.location = location;
+    return loadPlugin();
+}
+
+const VIZ_CTL = {
+    palette:         { key: 'palette',         label: 'Palette',                type: 'select', default: 'default', options: [{ id: 'default', label: 'Default' }, { id: 'neon', label: 'Neon' }, { id: 'pastel', label: 'Pastel' }] },
+    cameraSmoothing: { key: 'cameraSmoothing', label: 'Camera smoothing (X-pan)', type: 'range',  default: 0.5, min: 0, max: 1, step: 0.05 },
+    cameraLockLow:   { key: 'cameraLockLow',   label: 'Lock camera at frets 1–12', type: 'toggle', default: false },
+    cameraLockZoom:  { key: 'cameraLockZoom',  label: 'Locked zoom (In ↔ Out)',  type: 'range',  default: 0.5, min: 0, max: 1, step: 0.05 },
+};
+
+// ── _vizPanelGet ─────────────────────────────────────────────────────────────
+
+test('_vizPanelGet reads the panel-specific key when present', () => {
+    const mod = freshPlugin();
+    global.localStorage.setItem('h3d_bg_panel0_palette', 'neon');
+    assert.equal(mod._vizPanelGet('highway_3d', 0, VIZ_CTL.palette), 'neon');
+});
+
+test('_vizPanelGet prefers panel-specific over global key', () => {
+    const mod = freshPlugin();
+    global.localStorage.setItem('h3d_bg_palette', 'pastel');
+    global.localStorage.setItem('h3d_bg_panel0_palette', 'neon');
+    assert.equal(mod._vizPanelGet('highway_3d', 0, VIZ_CTL.palette), 'neon');
+});
+
+test('_vizPanelGet falls back to the global key when panel-specific is absent', () => {
+    const mod = freshPlugin();
+    global.localStorage.setItem('h3d_bg_palette', 'pastel');
+    assert.equal(mod._vizPanelGet('highway_3d', 0, VIZ_CTL.palette), 'pastel');
+});
+
+test('_vizPanelGet returns the descriptor default when neither key is set', () => {
+    const mod = freshPlugin();
+    assert.equal(mod._vizPanelGet('highway_3d', 0, VIZ_CTL.palette), 'default');
+});
+
+test('_vizPanelGet parses toggle values as booleans (true/1/false/0)', () => {
+    const mod = freshPlugin();
+    global.localStorage.setItem('h3d_bg_panel0_cameraLockLow', 'true');
+    assert.equal(mod._vizPanelGet('highway_3d', 0, VIZ_CTL.cameraLockLow), true);
+    global.localStorage.setItem('h3d_bg_panel0_cameraLockLow', '1');
+    assert.equal(mod._vizPanelGet('highway_3d', 0, VIZ_CTL.cameraLockLow), true);
+    global.localStorage.setItem('h3d_bg_panel0_cameraLockLow', 'false');
+    assert.equal(mod._vizPanelGet('highway_3d', 0, VIZ_CTL.cameraLockLow), false);
+    global.localStorage.setItem('h3d_bg_panel0_cameraLockLow', '0');
+    assert.equal(mod._vizPanelGet('highway_3d', 0, VIZ_CTL.cameraLockLow), false);
+});
+
+test('_vizPanelGet coerces unrecognized toggle strings to false, not the descriptor default', () => {
+    const mod = freshPlugin();
+    global.localStorage.setItem('h3d_bg_panel0_cameraLockLow', 'garbage');
+    // Descriptor default is true, so a regression that returns the default for
+    // unrecognized strings would fail here — only 'true'/'1' coerce to true
+    // (matching _vizPanelGet's v === 'true' || v === '1').
+    const ctl = { key: 'cameraLockLow', label: 'Lock camera at frets 1–12', type: 'toggle', default: true };
+    assert.equal(mod._vizPanelGet('highway_3d', 0, ctl), false);
+});
+
+test('_vizPanelGet clamps range values to the descriptor bounds', () => {
+    const mod = freshPlugin();
+    global.localStorage.setItem('h3d_bg_panel0_cameraSmoothing', '1.5');
+    assert.equal(mod._vizPanelGet('highway_3d', 0, VIZ_CTL.cameraSmoothing), 1); // clamped to max
+    global.localStorage.setItem('h3d_bg_panel0_cameraSmoothing', '-0.5');
+    assert.equal(mod._vizPanelGet('highway_3d', 0, VIZ_CTL.cameraSmoothing), 0); // clamped to min
+});
+
+test('_vizPanelGet returns default for non-numeric range values', () => {
+    const mod = freshPlugin();
+    global.localStorage.setItem('h3d_bg_panel0_cameraSmoothing', 'notanumber');
+    assert.equal(mod._vizPanelGet('highway_3d', 0, VIZ_CTL.cameraSmoothing), 0.5);
+});
+
+test('_vizPanelGet applies _ctlRange defaults when min/max/step are omitted from the descriptor', () => {
+    const mod = freshPlugin();
+    global.localStorage.setItem('h3d_bg_panel0_bareRange', '2.0');
+    const ctl = { key: 'bareRange', type: 'range', default: 0.5 };
+    // _ctlRange defaults: lo=0, hi=1, st=0.05 → 2.0 clamps to 1
+    assert.equal(mod._vizPanelGet('highway_3d', 0, ctl), 1);
+    global.localStorage.setItem('h3d_bg_panel0_bareRange', '-3');
+    assert.equal(mod._vizPanelGet('highway_3d', 0, ctl), 0);
+});
+
+// ── _vizPanelSet ─────────────────────────────────────────────────────────────
+
+test('_vizPanelSet writes only the panel-specific localStorage key', () => {
+    const mod = freshPlugin();
+    mod._vizPanelSet('highway_3d', 0, VIZ_CTL.palette, 'neon');
+    assert.equal(global.localStorage.getItem('h3d_bg_panel0_palette'), 'neon');
+    // Global key must NOT be touched
+    assert.equal(global.localStorage.getItem('h3d_bg_palette'), null);
+});
+
+test('_vizPanelSet writes to the correct per-panel index', () => {
+    const mod = freshPlugin();
+    mod._vizPanelSet('highway_3d', 2, VIZ_CTL.cameraLockLow, true);
+    assert.equal(global.localStorage.getItem('h3d_bg_panel2_cameraLockLow'), 'true');
+    assert.equal(global.localStorage.getItem('h3d_bg_panel0_cameraLockLow'), null);
+});
+
+test('_vizPanelSet re-fires the plugin setter with the GLOBAL value (not the panel value)', () => {
+    const mod = freshPlugin();
+    let firedWith = null;
+    window.h3dBgSetPalette = (v) => { firedWith = v; };
+    global.localStorage.setItem('h3d_bg_palette', 'pastel');
+    mod._vizPanelSet('highway_3d', 0, VIZ_CTL.palette, 'neon');
+    assert.equal(firedWith, 'pastel', 'setter must re-fire with the global value so the plugin\'s change event runs');
+});
+
+test('_vizPanelSet re-fires toggle setter with a coerced boolean from the global', () => {
+    const mod = freshPlugin();
+    let firedWith = null;
+    window.h3dBgSetCameraLockLow = (v) => { firedWith = v; };
+    global.localStorage.setItem('h3d_bg_cameraLockLow', 'true');
+    mod._vizPanelSet('highway_3d', 0, VIZ_CTL.cameraLockLow, true);
+    assert.equal(firedWith, true);
+});
+
+test('_vizPanelSet re-fires range setter with a parsed float from the global', () => {
+    const mod = freshPlugin();
+    let firedWith = null;
+    window.h3dBgSetCameraSmoothing = (v) => { firedWith = v; };
+    global.localStorage.setItem('h3d_bg_cameraSmoothing', '0.75');
+    mod._vizPanelSet('highway_3d', 0, VIZ_CTL.cameraSmoothing, 0.3);
+    assert.equal(firedWith, 0.75);
+});
+
+test('_vizPanelSet uses the descriptor default for the setter re-fire when the global key is absent', () => {
+    const mod = freshPlugin();
+    let firedWith = null;
+    window.h3dBgSetPalette = (v) => { firedWith = v; };
+    mod._vizPanelSet('highway_3d', 0, VIZ_CTL.palette, 'neon');
+    assert.equal(firedWith, 'default');
+});
+
+test('_vizPanelSet does not throw and skips the setter when the plugin is not loaded', () => {
+    const mod = freshPlugin();
+    assert.doesNotThrow(() => mod._vizPanelSet('highway_3d', 0, VIZ_CTL.palette, 'neon'));
+    assert.equal(global.localStorage.getItem('h3d_bg_panel0_palette'), 'neon');
+});
+
+// ── getPanelControlsFor ─────────────────────────────────────────────────────
+
+test('getPanelControlsFor returns null for plugins without per-panel controls', () => {
+    const mod = freshPlugin();
+    assert.equal(mod.getPanelControlsFor('piano'), null);
+    assert.equal(mod.getPanelControlsFor('jumpingtab'), null);
+    assert.equal(mod.getPanelControlsFor('unknown'), null);
+});
+
+test('getPanelControlsFor returns the built-in highway_3d descriptor (4 controls)', () => {
+    const mod = freshPlugin();
+    const ctrls = mod.getPanelControlsFor('highway_3d');
+    assert.ok(Array.isArray(ctrls));
+    assert.equal(ctrls.length, 4);
+    const keys = ctrls.map(c => c.key);
+    assert.deepEqual(keys, ['palette', 'cameraSmoothing', 'cameraLockLow', 'cameraLockZoom']);
+    assert.equal(ctrls[0].type, 'select');
+    assert.equal(ctrls[1].type, 'range');
+    assert.equal(ctrls[2].type, 'toggle');
+    assert.equal(ctrls[3].type, 'range');
+});
+
+test('getPanelControlsFor uses the plugin-published panelControls when present', () => {
+    const mod = freshVizPlugin();
+    window.feedBackViz_highway_3d = function () {};
+    window.feedBackViz_highway_3d.panelControls = [
+        { key: 'custom', label: 'Custom', type: 'toggle', default: true },
+    ];
+    const ctrls = mod.getPanelControlsFor('highway_3d');
+    assert.deepEqual(ctrls, [{ key: 'custom', label: 'Custom', type: 'toggle', default: true }]);
+});
+
+test('getPanelControlsFor treats an empty plugin-published panelControls as an opt-out', () => {
+    const mod = freshVizPlugin();
+    window.feedBackViz_highway_3d = function () {};
+    window.feedBackViz_highway_3d.panelControls = [];
+    const ctrls = mod.getPanelControlsFor('highway_3d');
+    assert.deepEqual(ctrls, []);
+});
+
+test('getPanelControlsFor prefers feedBackViz_ prefix over the legacy slopsmithViz_ prefix', () => {
+    const mod = freshVizPlugin();
+    window.slopsmithViz_highway_3d = function () {};
+    window.slopsmithViz_highway_3d.panelControls = [
+        { key: 'legacy', label: 'Legacy', type: 'toggle', default: false },
+    ];
+    window.feedBackViz_highway_3d = function () {};
+    window.feedBackViz_highway_3d.panelControls = [
+        { key: 'current', label: 'Current', type: 'toggle', default: true },
+    ];
+    const ctrls = mod.getPanelControlsFor('highway_3d');
+    assert.deepEqual(ctrls, [{ key: 'current', label: 'Current', type: 'toggle', default: true }]);
+});
+
+// ── buildVizPopover ──────────────────────────────────────────────────────────
+
+test('buildVizPopover clears the popover and appends a title row plus one control row per descriptor entry', () => {
+    const mod = freshVizPlugin();
+    mod._setArrangementsForTest([{ name: 'Lead' }]);
+
+    const pop = makeVizElementStub('div');
+    pop.innerHTML = '<stale>';
+    const panel = { vizPopover: pop, vizMode: 'highway_3d' };
+    mod._setPanelsForTest([panel]);
+
+    mod.buildVizPopover(panel, 'highway_3d');
+
+    assert.equal(pop.innerHTML, '', 'popover content must be cleared before rebuilding');
+    // title (1) + palette (select) + cameraSmoothing (range) + cameraLockLow (toggle) + cameraLockZoom (range)
+    assert.equal(pop.children.length, 5);
+});
+
+test('buildVizPopover creates a select with the correct options for a select control', () => {
+    const mod = freshVizPlugin();
+    mod._setArrangementsForTest([{ name: 'Lead' }]);
+    global.localStorage.setItem('h3d_bg_palette', 'neon');
+
+    const pop = makeVizElementStub('div');
+    const panel = { vizPopover: pop, vizMode: 'highway_3d' };
+    mod._setPanelsForTest([panel]);
+
+    const created = [];
+    global.document.createElement = (tag) => { const el = makeVizElementStub(tag); created.push(el); return el; };
+
+    mod.buildVizPopover(panel, 'highway_3d');
+
+    const selectEl = created.find(el => el.tagName === 'SELECT');
+    assert.ok(selectEl, 'should create a select with 3 option elements');
+    // The value should be sourced from _vizPanelGet (falls back to global 'neon')
+    assert.equal(selectEl.value, 'neon');
+    // Simulate the user picking 'midnight' — the onchange handler reads sel.value
+    selectEl.value = 'midnight';
+    selectEl.onchange();
+    assert.equal(global.localStorage.getItem('h3d_bg_panel0_palette'), 'midnight');
+});
+
+test('buildVizPopover creates a range input honoring _ctlRange defaults and fires oninput', () => {
+    const mod = freshVizPlugin();
+    mod._setArrangementsForTest([{ name: 'Lead' }]);
+
+    const pop = makeVizElementStub('div');
+    const panel = { vizPopover: pop, vizMode: 'highway_3d' };
+    mod._setPanelsForTest([panel]);
+
+    const created = [];
+    global.document.createElement = (tag) => { const el = makeVizElementStub(tag); created.push(el); return el; };
+
+    mod.buildVizPopover(panel, 'highway_3d');
+
+    const rangeEl = created.find(el => el.type === 'range');
+    assert.ok(rangeEl, 'should create a range input');
+    assert.equal(rangeEl.min, '0');
+    assert.equal(rangeEl.max, '1');
+    assert.equal(rangeEl.step, '0.05');
+    assert.equal(rangeEl.value, '0.5'); // default cameraSmoothing
+
+    // Fire oninput — should write the panel pref
+    rangeEl.value = '0.8';
+    rangeEl.oninput();
+    assert.equal(global.localStorage.getItem('h3d_bg_panel0_cameraSmoothing'), '0.8');
+});
+
+test('buildVizPopover creates a checkbox for toggle controls and fires onchange', () => {
+    const mod = freshVizPlugin();
+    mod._setArrangementsForTest([{ name: 'Lead' }]);
+    // Pre-set the panel-specific value so we can verify the checkbox reads it
+    global.localStorage.setItem('h3d_bg_panel0_cameraLockLow', 'true');
+
+    const pop = makeVizElementStub('div');
+    const panel = { vizPopover: pop, vizMode: 'highway_3d' };
+    mod._setPanelsForTest([panel]);
+
+    const created = [];
+    global.document.createElement = (tag) => { const el = makeVizElementStub(tag); created.push(el); return el; };
+
+    mod.buildVizPopover(panel, 'highway_3d');
+
+    const checkboxEl = created.find(el => el.type === 'checkbox');
+    assert.ok(checkboxEl, 'should create a checkbox input for toggle controls');
+    assert.equal(checkboxEl.checked, true, 'checkbox should reflect the saved panel-specific value');
+
+    // Fire onchange (checkbox was toggled off)
+    checkboxEl.checked = false;
+    checkboxEl.onchange();
+    assert.equal(global.localStorage.getItem('h3d_bg_panel0_cameraLockLow'), 'false');
+});
+
+test('buildVizPopover re-fires the plugin setter when its onchange handler runs', () => {
+    const mod = freshVizPlugin();
+    mod._setArrangementsForTest([{ name: 'Lead' }]);
+
+    let firedWith = null;
+    window.h3dBgSetCameraLockLow = (v) => { firedWith = v; };
+    // Global is 'true' so the setter re-fire should pass `true`
+    global.localStorage.setItem('h3d_bg_cameraLockLow', 'true');
+
+    const pop = makeVizElementStub('div');
+    const panel = { vizPopover: pop, vizMode: 'highway_3d' };
+    mod._setPanelsForTest([panel]);
+
+    const created = [];
+    global.document.createElement = (tag) => { const el = makeVizElementStub(tag); created.push(el); return el; };
+
+    mod.buildVizPopover(panel, 'highway_3d');
+
+    const checkboxEl = created.find(el => el.type === 'checkbox');
+    checkboxEl.checked = true;
+    checkboxEl.onchange();
+
+    assert.equal(firedWith, true, 'onchange should re-fire the plugin setter with the global value');
+});
+
+test('buildVizPopover uses _ctlRange defaults for a range control with no min/max/step in the descriptor', () => {
+    const mod = freshVizPlugin();
+    mod._setArrangementsForTest([{ name: 'Lead' }]);
+    delete window.feedBackViz_highway_3d;
+
+    // Inject a custom control set via the plugin-published panelControls
+    window.feedBackViz_highway_3d = function () {};
+    window.feedBackViz_highway_3d.panelControls = [
+        { key: 'bareRange', label: 'Bare', type: 'range', default: 0.5 },
+    ];
+
+    const pop = makeVizElementStub('div');
+    const panel = { vizPopover: pop, vizMode: 'highway_3d' };
+    mod._setPanelsForTest([panel]);
+
+    const created = [];
+    global.document.createElement = (tag) => { const el = makeVizElementStub(tag); created.push(el); return el; };
+
+    mod.buildVizPopover(panel, 'highway_3d');
+
+    const rangeEl = created.find(el => el.type === 'range');
+    assert.ok(rangeEl);
+    assert.equal(rangeEl.min, '0');   // _ctlRange default lo
+    assert.equal(rangeEl.max, '1');   // _ctlRange default hi
+    assert.equal(rangeEl.step, '0.05'); // _ctlRange default st
+    assert.equal(rangeEl.value, '0.5'); // descriptor default
+});
+
+test('buildVizPopover bails when the panel is not in the panels array', () => {
+    const mod = freshVizPlugin();
+    mod._setArrangementsForTest([{ name: 'Lead' }]);
+    mod._setPanelsForTest([]); // empty — the panel is not registered
+
+    const pop = makeVizElementStub('div');
+    const panel = { vizPopover: pop, vizMode: 'highway_3d' };
+
+    mod.buildVizPopover(panel, 'highway_3d');
+
+    assert.equal(pop.children.length, 0, 'popover should be empty when the panel is not registered');
+});
+
+test('buildVizPopover bails when getPanelControlsFor returns null', () => {
+    const mod = freshVizPlugin();
+    mod._setArrangementsForTest([{ name: 'Lead' }]);
+
+    const pop = makeVizElementStub('div');
+    const panel = { vizPopover: pop, vizMode: 'piano' };
+    mod._setPanelsForTest([panel]);
+
+    mod.buildVizPopover(panel, 'piano');
+
+    assert.equal(pop.children.length, 0, 'popover should be empty when there are no per-panel controls');
+});

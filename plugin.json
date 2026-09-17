@@ -1,7 +1,7 @@
 {
   "id": "splitscreen",
   "name": "Split Screen",
-  "version": "1.14.10",
+  "version": "1.14.11",
   "private": false,
   "standards": ["plugin-runtime-idempotent.v1"],
   "settings": {

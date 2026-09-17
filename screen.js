@@ -5718,6 +5718,7 @@ try {
         module.exports = {
             getWsUrl, resolveArrIndex, getDefaultArrangements,
             panelToPrefs, migratePanelPrefs, _ctlRange,
+            _vizPanelGet, _vizPanelSet, getPanelControlsFor, buildVizPopover,
             getSyncUrl, generateRoomKey, normalizeRoomKey, ensureRoomKey,
             buildShareUrl, makeRemoteFollowerCfg, ROOM_KEY_ALPHABET,
             LAN_TIME_MIN_INTERVAL_MS,
