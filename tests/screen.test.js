@@ -1246,6 +1246,75 @@ test('_handleFollowerSongChange does nothing once the follower is orphaned', asy
         'an orphaned follower must not enter the rebuild path');
 });
 
+test('_handleFollowerSongChange coalesces a second filename while a rebuild is in flight', async () => {
+    const mod = freshPlugin();
+    mod._setFollowerRebuildBusyForTest(true);
+    await mod._handleFollowerSongChange('latest.sloppak');
+    assert.equal(mod._getFollowerPendingFilenameForTest(), 'latest.sloppak',
+        'the later change must be retained for the current rebuild to consume');
+});
+
+test('follower interpolation derives the observed playback rate and stops at the extrapolation cap', () => {
+    const oldRaf = global.requestAnimationFrame;
+    const oldCancelRaf = global.cancelAnimationFrame;
+    const oldPerformance = global.performance;
+    let now = 1000;
+    let tick = null;
+    let nextFrame = 0;
+    global.requestAnimationFrame = (cb) => { tick = cb; return ++nextFrame; };
+    global.cancelAnimationFrame = noop;
+    global.performance = { now: () => now };
+    try {
+        const mod = freshPlugin();
+        const seen = [];
+        mod._setPanelsForTest([makeFollowerPanel({ hw: { setTime: (t) => seen.push(t) } })]);
+        mod._onFollowerTimeMessage(4, true);
+        now = 1250;
+        mod._onFollowerTimeMessage(4.5, true); // 0.5 s media / 0.25 s wall = 2x
+        mod._startFollowerInterp();
+        now = 1500;
+        tick();
+        assert.equal(mod._getFollowerCurrentTimeForTest(), 5,
+            'the rAF estimate must use the observed 2x rate between broadcasts');
+        assert.equal(seen.at(-1), 5);
+
+        now = 3600; // 2.35 s since the last anchor: beyond the 2 s safety cap
+        tick();
+        assert.equal(mod._getFollowerPlayingForTest(), false,
+            'the follower must stop extrapolating after the safety cap');
+        assert.equal(mod._getFollowerCurrentTimeForTest(), 5,
+            'the capped frame must not advance the playhead further');
+        mod._stopFollowerInterp();
+    } finally {
+        global.requestAnimationFrame = oldRaf;
+        global.cancelAnimationFrame = oldCancelRaf;
+        global.performance = oldPerformance;
+    }
+});
+
+test('the main BroadcastChannel listener defers docked messages and drops closed popups', () => {
+    const oldBroadcastChannel = global.BroadcastChannel;
+    let channel = null;
+    global.BroadcastChannel = class {
+        constructor() { channel = this; }
+    };
+    try {
+        const mod = freshPlugin();
+        mod._setPopupsForTest([['docked', { popup: {} }], ['closed', { popup: {} }]]);
+        mod._setStartingForTest(true);
+        mod._ensureMainBroadcasterAndListener();
+        channel.onmessage({ data: { type: 'docked', popupId: 'docked', finalState: { arrName: 'Bass' } } });
+        channel.onmessage({ data: { type: 'closed', popupId: 'closed' } });
+        assert.deepEqual(mod._getPendingRedocksForTest(), [{ popupId: 'docked', finalState: { arrName: 'Bass' }, finalStates: null }]);
+        assert.equal(mod._getPopupsForTest().has('docked'), true,
+            'a queued redock keeps its popup entry until the start finishes');
+        assert.equal(mod._getPopupsForTest().has('closed'), false,
+            'a plain closed message releases its popup entry immediately');
+    } finally {
+        global.BroadcastChannel = oldBroadcastChannel;
+    }
+});
+
 // ── _redockPanel deferral while a start is in flight ────────────────────────
 
 test('_redockPanel defers into _pendingRedocks when a start is in flight', () => {
