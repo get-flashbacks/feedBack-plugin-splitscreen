@@ -2291,6 +2291,14 @@ function makeLifecycleEl(tag) {
         insertBefore(child) { this.children.push(child); child.parentNode = this; return child; },
         removeChild(child) { this.children = this.children.filter(c => c !== child); return child; },
         remove() { if (this.parentNode) this.parentNode.removeChild(this); },
+        replaceWith(next) {
+            if (this.parentNode) {
+                const idx = this.parentNode.children.indexOf(this);
+                if (idx >= 0) this.parentNode.children[idx] = next;
+                next.parentNode = this.parentNode;
+            }
+            this.parentNode = null;
+        },
         addEventListener() {},
         removeEventListener() {},
         setAttribute(k, v) { this.attributes[k] = v; },
@@ -2471,5 +2479,191 @@ test('initPanel sets the documented default panel object shape (mode flags null/
     } finally {
         delete global.createHighway;
         await mod.stopSplitScreen();
+    }
+});
+
+// ── Panel render-mode transitions and mutual exclusivity (splitscreen#53) ──
+//
+// CLAUDE.md: "Each panel is always in exactly one of these modes. Flags are
+// mutually exclusive: entering one exits the others." Nothing in the suite
+// previously drove enterLyricsMode/enterVizMode/exitVizMode/exitLyricsMode
+// directly — recreatePanelHighway (which these call internally) already has
+// its own dedicated coverage; these tests target the mode-flag bookkeeping
+// layer sitting on top of it.
+
+function stubBrowserGlobalsForModeTransitions() {
+    const originalWebSocket = global.WebSocket;
+    const originalRaf = global.requestAnimationFrame;
+    const originalCaf = global.cancelAnimationFrame;
+    // createLyricsPane's connect() does `new WebSocket(...)` with no
+    // try/catch and `requestAnimationFrame(render)` — neither exists in
+    // bare Node, and modern Node DOES ship a real global WebSocket that
+    // would otherwise attempt a genuine (doomed) network connection to
+    // localhost:8420 (same class of hazard CLAUDE.md's "Test-env note"
+    // documents for the remote-join path). Stub both for the duration.
+    global.WebSocket = function (url) { return new FakeWebSocket(0); };
+    global.requestAnimationFrame = () => 1;
+    global.cancelAnimationFrame = () => {};
+    return function restore() {
+        global.WebSocket = originalWebSocket;
+        global.requestAnimationFrame = originalRaf;
+        global.cancelAnimationFrame = originalCaf;
+    };
+}
+
+function makeFakeVizFactory({ contextType = '2d' } = {}) {
+    const fn = () => ({
+        contextType,
+        init() {}, draw() {}, destroy() {}, resize() {},
+    });
+    return fn;
+}
+
+test('enterLyricsMode exits an active viz mode first (mutual exclusivity)', async () => {
+    const mod = freshLifecyclePlugin();
+    global.createHighway = () => ({
+        init() {}, stop() {}, connect() {}, getRenderScale: () => 1,
+        getInverted: () => false, getLefty: () => false, getMastery: () => 1,
+        setInverted() {}, setLefty() {}, setMastery() {}, setRenderer() {}, setLyricsVisible() {},
+    });
+    global.window.feedBackViz_myviz = makeFakeVizFactory();
+    const restore = stubBrowserGlobalsForModeTransitions();
+    try {
+        await mod._getVizPluginsReadyForTest();
+        await mod.startSplitScreen([0, 1]);
+        const panel = mod._getPanelsForTest()[0];
+
+        mod.enterVizMode(panel, 'myviz');
+        assert.equal(panel.vizMode, 'myviz', 'sanity: panel entered viz mode');
+        assert.equal(panel.lyricsMode, false);
+
+        mod.enterLyricsMode(panel);
+        assert.equal(panel.lyricsMode, true, 'entering lyrics mode must actually take effect');
+        assert.equal(panel.vizMode, null, 'entering lyrics mode must exit the prior viz mode, not stack on top of it');
+    } finally {
+        await mod.stopSplitScreen();
+        restore();
+        delete global.window.feedBackViz_myviz;
+        delete global.createHighway;
+    }
+});
+
+test('enterVizMode exits an active lyrics mode first (mutual exclusivity)', async () => {
+    const mod = freshLifecyclePlugin();
+    global.createHighway = () => ({
+        init() {}, stop() {}, connect() {}, getRenderScale: () => 1,
+        getInverted: () => false, getLefty: () => false, getMastery: () => 1,
+        setInverted() {}, setLefty() {}, setMastery() {}, setRenderer() {}, setLyricsVisible() {},
+    });
+    global.window.feedBackViz_myviz = makeFakeVizFactory();
+    const restore = stubBrowserGlobalsForModeTransitions();
+    try {
+        await mod._getVizPluginsReadyForTest();
+        await mod.startSplitScreen([0, 1]);
+        const panel = mod._getPanelsForTest()[0];
+
+        mod.enterLyricsMode(panel);
+        assert.equal(panel.lyricsMode, true, 'sanity: panel entered lyrics mode');
+
+        mod.enterVizMode(panel, 'myviz');
+        assert.equal(panel.vizMode, 'myviz', 'entering viz mode must actually take effect');
+        assert.equal(panel.lyricsMode, false, 'entering viz mode must exit the prior lyrics mode, not stack on top of it');
+    } finally {
+        await mod.stopSplitScreen();
+        restore();
+        delete global.window.feedBackViz_myviz;
+        delete global.createHighway;
+    }
+});
+
+test('enterLyricsMode is a no-op when the panel is already in lyrics mode', async () => {
+    const mod = freshLifecyclePlugin();
+    global.createHighway = () => ({
+        init() {}, stop() {}, connect() {}, getRenderScale: () => 1,
+        getInverted: () => false, getLefty: () => false, getMastery: () => 1,
+        setInverted() {}, setLefty() {}, setMastery() {}, setRenderer() {}, setLyricsVisible() {},
+    });
+    const restore = stubBrowserGlobalsForModeTransitions();
+    try {
+        await mod._getVizPluginsReadyForTest();
+        await mod.startSplitScreen([0, 1]);
+        const panel = mod._getPanelsForTest()[0];
+
+        mod.enterLyricsMode(panel);
+        const firstPane = panel.lyricsPane;
+        assert.ok(firstPane, 'sanity: a lyrics pane was created');
+
+        mod.enterLyricsMode(panel);
+        assert.equal(panel.lyricsPane, firstPane,
+            'a second enterLyricsMode call on an already-lyrics panel must not tear down and recreate the pane');
+    } finally {
+        await mod.stopSplitScreen();
+        restore();
+        delete global.createHighway;
+    }
+});
+
+test('enterVizMode is a no-op when the panel is already in ANY viz mode, even a different plugin', async () => {
+    // This is exactly why the panel.select.onchange handler has its own
+    // separate in-place viz-to-viz switch branch instead of just calling
+    // enterVizMode again — enterVizMode's own `if (panel.vizMode) return;`
+    // guard makes a direct call a no-op regardless of which plugin is
+    // requested, by design (mirrors the lyrics no-op guard above).
+    const mod = freshLifecyclePlugin();
+    global.createHighway = () => ({
+        init() {}, stop() {}, connect() {}, getRenderScale: () => 1,
+        getInverted: () => false, getLefty: () => false, getMastery: () => 1,
+        setInverted() {}, setLefty() {}, setMastery() {}, setRenderer() {}, setLyricsVisible() {},
+    });
+    global.window.feedBackViz_vizA = makeFakeVizFactory();
+    global.window.feedBackViz_vizB = makeFakeVizFactory();
+    const restore = stubBrowserGlobalsForModeTransitions();
+    try {
+        await mod._getVizPluginsReadyForTest();
+        await mod.startSplitScreen([0, 1]);
+        const panel = mod._getPanelsForTest()[0];
+
+        mod.enterVizMode(panel, 'vizA');
+        assert.equal(panel.vizMode, 'vizA');
+
+        mod.enterVizMode(panel, 'vizB');
+        assert.equal(panel.vizMode, 'vizA', 'a direct enterVizMode call while already in viz mode must be a no-op');
+    } finally {
+        await mod.stopSplitScreen();
+        restore();
+        delete global.window.feedBackViz_vizA;
+        delete global.window.feedBackViz_vizB;
+        delete global.createHighway;
+    }
+});
+
+test('the in-place viz-to-viz switch (panel.select.onchange) installs the new plugin, unlike a direct enterVizMode call', async () => {
+    const mod = freshLifecyclePlugin();
+    global.createHighway = () => ({
+        init() {}, stop() {}, connect() {}, getRenderScale: () => 1,
+        getInverted: () => false, getLefty: () => false, getMastery: () => 1,
+        setInverted() {}, setLefty() {}, setMastery() {}, setRenderer() {}, setLyricsVisible() {},
+    });
+    global.window.feedBackViz_vizA = makeFakeVizFactory();
+    global.window.feedBackViz_vizB = makeFakeVizFactory();
+    const restore = stubBrowserGlobalsForModeTransitions();
+    try {
+        await mod._getVizPluginsReadyForTest();
+        await mod.startSplitScreen([0, 1]);
+        const panel = mod._getPanelsForTest()[0];
+
+        mod.enterVizMode(panel, 'vizA');
+        assert.equal(panel.vizMode, 'vizA', 'sanity: panel entered viz mode with vizA');
+
+        panel.select.value = '__viz__:vizB:' + panel.arrIndex;
+        panel.select.onchange();
+        assert.equal(panel.vizMode, 'vizB',
+            'the in-place select.onchange branch must actually switch plugins where a direct enterVizMode call would no-op');
+    } finally {
+        await mod.stopSplitScreen();
+        restore();
+        delete global.window.feedBackViz_vizA;
+        delete global.window.feedBackViz_vizB;
+        delete global.createHighway;
     }
 });
