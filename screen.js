@@ -5812,6 +5812,14 @@ try {
             _panelRole,
             sizeCanvases,
             recreatePanelHighway,
+            // Render-mode transitions are exercised by the Node stub host.
+            // These remain private browser implementation details; exporting
+            // them here only exposes deterministic test seams.
+            enterLyricsMode,
+            exitLyricsMode,
+            enterVizMode,
+            exitVizMode,
+            initPanel,
             _showVizControls,
             _hideVizControls,
             _closeAllVizPopovers,
