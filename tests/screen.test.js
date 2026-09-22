@@ -1388,6 +1388,8 @@ function makeVizElementStub(tag) {
         innerHTML: '',
         dataset: {},
         closest: () => null,
+        remove: noop,
+        replaceWith: noop,
         children: [],
     };
     return el;
@@ -2199,6 +2201,116 @@ test('recreatePanelHighway always turns off the highway-native lyrics flag (the 
         delete global.createHighway;
     }
 });
+
+// The remaining #53 coverage deliberately drives the public UI handlers via
+// the Node host.  The stubs below record lifecycle calls without attempting
+// to emulate a browser canvas or a real WebSocket.
+function makeModeCanvas() {
+    let replacement = null;
+    return {
+        style: { cssText: 'width:100%;height:100%;display:block;', display: '' },
+        replaceWith(next) { replacement = next; },
+        _replacement: () => replacement,
+    };
+}
+
+function makeModePanel(hw) {
+    const button = () => ({ style: {}, onclick: null, disabled: false });
+    const panelDiv = makeVizElementStub('div');
+    panelDiv.getBoundingClientRect = () => ({ width: 100, height: 100 });
+    return {
+        hw,
+        canvas: makeModeCanvas(),
+        panelDiv,
+        bar: { style: { display: '' }, offsetHeight: 28 },
+        select: makeVizElementStub('select'),
+        arrName: { textContent: '' },
+        invertBtn: button(), leftyBtn: button(), lyricsBtn: button(), chordsBtn: button(),
+        detectBtn: button(), channelBtn: button(),
+        masteryHeading: { style: {} }, masterySlider: Object.assign(button(), { value: '100' }),
+        masteryLabel: { style: {}, textContent: '' },
+        popOutBtn: button(), vizSettingsBtn: button(), vizPopover: makeVizElementStub('div'),
+        updateInvertStyle: noop, updateLeftyStyle: noop, updateLyricsStyle: noop, updateChordsStyle: noop,
+    };
+}
+
+function withModeRuntime(fn) {
+    const saved = { WebSocket: global.WebSocket, requestAnimationFrame: global.requestAnimationFrame, cancelAnimationFrame: global.cancelAnimationFrame, createHighway: global.createHighway };
+    global.WebSocket = class { close() {} };
+    global.requestAnimationFrame = () => 1;
+    global.cancelAnimationFrame = noop;
+    try { fn(); }
+    finally {
+        global.WebSocket = saved.WebSocket;
+        global.requestAnimationFrame = saved.requestAnimationFrame;
+        global.cancelAnimationFrame = saved.cancelAnimationFrame;
+        global.createHighway = saved.createHighway;
+    }
+}
+
+test('lyrics and viz modes are mutually exclusive across a single panel', () => withModeRuntime(() => {
+    const mod = freshVizPlugin();
+    mod._setCurrentFilenameForTest('song.sloppak');
+    mod._setArrangementsForTest([{ name: 'Lead' }]);
+    const oldHw = makeFakeHighway({ connect: noop });
+    const panel = makeModePanel(oldHw);
+    const initialCanvas = panel.canvas;
+    mod._setPanelsForTest([panel]);
+
+    mod.enterLyricsMode(panel);
+    assert.equal(panel.lyricsMode, true);
+    assert.equal(panel.canvas.style.display, 'none');
+    assert.equal(oldHw._stopped, true, 'lyrics mode stops the normal highway');
+
+    const replacement = makeFakeHighway({ connect: noop });
+    global.createHighway = () => replacement;
+    window.feedBackViz_webgl = () => ({ kind: 'webgl' });
+    mod.enterVizMode(panel, 'webgl');
+    assert.equal(panel.lyricsMode, false, 'entering viz exits the lyrics pane first');
+    assert.equal(panel.vizMode, 'webgl');
+    assert.notEqual(panel.canvas, initialCanvas, 'viz gets a fresh highway canvas after leaving lyrics mode');
+
+    mod.enterLyricsMode(panel);
+    assert.equal(panel.vizMode, null, 'entering lyrics exits the visualization first');
+    assert.equal(panel.lyricsMode, true);
+}));
+
+test('a viz arrangement switch replaces the canvas for each 2D/WebGL context-type swap', () => withModeRuntime(() => {
+    const mod = freshVizPlugin();
+    mod._setCurrentFilenameForTest('song.sloppak');
+    mod._setArrangementsForTest([{ name: 'Lead' }, { name: 'Rhythm' }]);
+    const calls = [];
+    const initial = makeFakeHighway({ connect: noop, setRenderer: (r) => calls.push(['clear', r]) });
+    const panel = makeModePanel(initial);
+    panel.vizMode = 'webgl';
+    panel.arrIndex = 0;
+    mod._setPanelsForTest([panel]);
+    window.feedBackViz_webgl = () => ({ context: 'webgl' });
+    window.feedBackViz_twod = () => ({ context: '2d' });
+    global.createHighway = () => makeFakeHighway({
+        connect: noop,
+        setRenderer: (r) => calls.push(r ? ['install', r.context] : ['clear', r]),
+    });
+
+    // initPanel owns the real select.onchange branch.  Its node-only export
+    // is the narrow seam needed to exercise that branch deterministically.
+    mod.initPanel(panel, 0, { arrName: '__viz__:webgl:Lead' });
+    const firstCanvas = panel.canvas;
+    panel.select.value = '__viz__:twod:1';
+    panel.select.onchange();
+    const secondCanvas = panel.canvas;
+    panel.select.value = '__viz__:webgl:0';
+    panel.select.onchange();
+
+    assert.notEqual(secondCanvas, firstCanvas, 'WebGL → 2D must discard the context-locked canvas');
+    assert.notEqual(panel.canvas, secondCanvas, '2D → WebGL must discard that replacement canvas too');
+    assert.deepEqual(calls.filter(([kind, renderer]) => kind === 'clear' && renderer === null), [['clear', null], ['clear', null]],
+        'each in-viz arrangement switch clears the outgoing renderer before replacement');
+    assert.deepEqual(calls.filter(([kind]) => kind === 'install').map(([, context]) => context), ['2d', 'webgl'],
+        'each fresh highway pre-installs the requested renderer before init');
+    assert.equal(panel.arrIndex, 0);
+    assert.equal(panel.vizMode, 'webgl');
+}));
 
 // ── Player-context overrides: patch semantics (splitscreen#50) ─────────────
 // window.slopsmithSplitscreen.setPlayerContext(i, patch) must PATCH the
