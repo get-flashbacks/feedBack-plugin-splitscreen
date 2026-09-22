@@ -1,7 +1,7 @@
 {
   "id": "splitscreen",
   "name": "Split Screen",
-  "version": "1.14.15",
+  "version": "1.14.16",
   "private": false,
   "standards": ["capability-pipelines.v1", "plugin-runtime-idempotent.v1"],
   "capabilities": {
