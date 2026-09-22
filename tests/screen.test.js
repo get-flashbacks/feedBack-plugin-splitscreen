@@ -2312,7 +2312,6 @@ test('a viz arrangement switch replaces the canvas for each 2D/WebGL context-typ
     const calls = [];
     const initial = makeFakeHighway({ connect: noop, setRenderer: (r) => calls.push(['clear', r]) });
     const panel = makeModePanel(initial);
-    panel.vizMode = 'webgl';
     panel.arrIndex = 0;
     mod._setPanelsForTest([panel]);
     window.feedBackViz_webgl = () => ({ context: 'webgl' });
@@ -2398,3 +2397,5 @@ test('_panelRole does not misclassify an unrelated arrangement as karaoke', () =
     const mod = freshPlugin();
     mod._setArrangementsForTest([{ name: 'Lead Guitar' }]);
     const panel = { arrIndex: 0, lyricsMode: false };
+    assert.deepEqual(mod._panelRole(panel), { instrument: 'guitar', role: 'lead' });
+});
