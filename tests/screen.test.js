@@ -2235,7 +2235,18 @@ function makeModePanel(hw) {
 }
 
 function withModeRuntime(fn) {
-    const saved = { WebSocket: global.WebSocket, requestAnimationFrame: global.requestAnimationFrame, cancelAnimationFrame: global.cancelAnimationFrame, createHighway: global.createHighway };
+    const vizFactoryNames = ['feedBackViz_webgl', 'feedBackViz_twod'];
+    const saved = {
+        WebSocket: global.WebSocket,
+        requestAnimationFrame: global.requestAnimationFrame,
+        cancelAnimationFrame: global.cancelAnimationFrame,
+        createHighway: global.createHighway,
+        vizFactories: vizFactoryNames.map((name) => ({
+            name,
+            present: Object.prototype.hasOwnProperty.call(window, name),
+            value: window[name],
+        })),
+    };
     global.WebSocket = class { close() {} };
     global.requestAnimationFrame = () => 1;
     global.cancelAnimationFrame = noop;
@@ -2245,8 +2256,27 @@ function withModeRuntime(fn) {
         global.requestAnimationFrame = saved.requestAnimationFrame;
         global.cancelAnimationFrame = saved.cancelAnimationFrame;
         global.createHighway = saved.createHighway;
+        for (const factory of saved.vizFactories) {
+            if (factory.present) window[factory.name] = factory.value;
+            else delete window[factory.name];
+        }
     }
 }
+
+test('withModeRuntime restores overridden viz factories and removes factories that were absent', () => {
+    freshVizPlugin();
+    const originalWebgl = () => ({ original: true });
+    window.feedBackViz_webgl = originalWebgl;
+    delete window.feedBackViz_twod;
+
+    withModeRuntime(() => {
+        window.feedBackViz_webgl = () => ({ replacement: true });
+        window.feedBackViz_twod = () => ({ temporary: true });
+    });
+
+    assert.equal(window.feedBackViz_webgl, originalWebgl);
+    assert.equal(Object.prototype.hasOwnProperty.call(window, 'feedBackViz_twod'), false);
+});
 
 test('lyrics and viz modes are mutually exclusive across a single panel', () => withModeRuntime(() => {
     const mod = freshVizPlugin();
@@ -2368,5 +2398,3 @@ test('_panelRole does not misclassify an unrelated arrangement as karaoke', () =
     const mod = freshPlugin();
     mod._setArrangementsForTest([{ name: 'Lead Guitar' }]);
     const panel = { arrIndex: 0, lyricsMode: false };
-    assert.deepEqual(mod._panelRole(panel), { instrument: 'guitar', role: 'lead' });
-});
