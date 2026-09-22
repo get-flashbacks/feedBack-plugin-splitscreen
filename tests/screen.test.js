@@ -1246,6 +1246,161 @@ test('_handleFollowerSongChange does nothing once the follower is orphaned', asy
         'an orphaned follower must not enter the rebuild path');
 });
 
+test('_handleFollowerSongChange coalesces a second filename while a rebuild is in flight', async () => {
+    const mod = freshPlugin();
+    mod._setFollowerRebuildBusyForTest(true);
+    await mod._handleFollowerSongChange('latest.sloppak');
+    assert.equal(mod._getFollowerPendingFilenameForTest(), 'latest.sloppak',
+        'the later change must be retained for the current rebuild to consume');
+});
+
+test('_handleFollowerSongChange drains the parked filename into a rebuild once one finishes', async () => {
+    const mod = freshPlugin();
+    const playSongCalls = [];
+    global.window.playSong = async (f) => { playSongCalls.push(f); };
+    // The harness rebuild fails fast (no `highway` global) and the plugin
+    // logs-and-continues — silence the expected noise so the run stays clean.
+    const origError = console.error;
+    console.error = noop;
+    try {
+        mod._setCurrentFilenameForTest('current.sloppak');
+        mod._setFollowerRebuildBusyForTest(true);
+        await mod._handleFollowerSongChange('latest.sloppak');
+        assert.equal(mod._getFollowerPendingFilenameForTest(), 'latest.sloppak',
+            'the later change must be parked while the rebuild is in flight');
+
+        // A fresh change runs a full rebuild once the in-flight one finishes;
+        // its finally must consume the parked filename and re-invoke it
+        // instead of dropping it.
+        mod._setFollowerRebuildBusyForTest(false);
+        await mod._handleFollowerSongChange('first.sloppak');
+        await new Promise((r) => setImmediate(r)); // let the fire-and-forget recursion finish
+        assert.equal(mod._getFollowerPendingFilenameForTest(), null,
+            'the drain must consume the parked filename');
+        assert.ok(playSongCalls.includes('latest.sloppak'),
+            'the parked filename must be re-invoked, not dropped');
+        assert.ok(playSongCalls.includes('first.sloppak'),
+            'the driving rebuild must also run');
+    } finally {
+        delete global.window.playSong;
+        console.error = origError;
+    }
+});
+
+test('the drain skips re-invoking a parked filename that is already the current song', async () => {
+    const mod = freshPlugin();
+    const playSongCalls = [];
+    global.window.playSong = async (f) => { playSongCalls.push(f); };
+    const origError = console.error;
+    console.error = noop;
+    try {
+        mod._setCurrentFilenameForTest('latest.sloppak');
+        mod._setFollowerRebuildBusyForTest(true);
+        await mod._handleFollowerSongChange('latest.sloppak');
+        assert.equal(mod._getFollowerPendingFilenameForTest(), 'latest.sloppak',
+            'the later change must be parked while the rebuild is in flight');
+
+        mod._setFollowerRebuildBusyForTest(false);
+        await mod._handleFollowerSongChange('first.sloppak');
+        assert.equal(mod._getFollowerPendingFilenameForTest(), null,
+            'the drain must still consume the parked filename');
+        assert.ok(playSongCalls.includes('first.sloppak'),
+            'the driving rebuild must run');
+        assert.ok(!playSongCalls.includes('latest.sloppak'),
+            'a parked filename equal to the current song must not trigger a redundant rebuild');
+    } finally {
+        delete global.window.playSong;
+        console.error = origError;
+    }
+});
+
+test('follower interpolation derives the observed playback rate and stops at the extrapolation cap', () => {
+    const oldRaf = global.requestAnimationFrame;
+    const oldCancelRaf = global.cancelAnimationFrame;
+    const oldPerformance = global.performance;
+    let now = 1000;
+    let tick = null;
+    let nextFrame = 0;
+    global.requestAnimationFrame = (cb) => { tick = cb; return ++nextFrame; };
+    global.cancelAnimationFrame = noop;
+    global.performance = { now: () => now };
+    try {
+        const mod = freshPlugin();
+        const seen = [];
+        mod._setPanelsForTest([makeFollowerPanel({ hw: { setTime: (t) => seen.push(t) } })]);
+        mod._onFollowerTimeMessage(4, true);
+        now = 1250;
+        mod._onFollowerTimeMessage(4.5, true); // 0.5 s media / 0.25 s wall = 2x
+        mod._startFollowerInterp();
+        now = 1500;
+        tick();
+        assert.equal(mod._getFollowerCurrentTimeForTest(), 5,
+            'the rAF estimate must use the observed 2x rate between broadcasts');
+        assert.equal(seen.at(-1), 5);
+
+        now = 3600; // 2.35 s since the last anchor: beyond the 2 s safety cap
+        tick();
+        assert.equal(mod._getFollowerPlayingForTest(), false,
+            'the follower must stop extrapolating after the safety cap');
+        assert.equal(mod._getFollowerCurrentTimeForTest(), 5,
+            'the capped frame must not advance the playhead further');
+        mod._stopFollowerInterp();
+    } finally {
+        global.requestAnimationFrame = oldRaf;
+        global.cancelAnimationFrame = oldCancelRaf;
+        global.performance = oldPerformance;
+    }
+});
+
+test('the main BroadcastChannel listener defers docked messages and drops closed popups', () => {
+    const oldBroadcastChannel = global.BroadcastChannel;
+    let channel = null;
+    global.BroadcastChannel = class {
+        constructor() { channel = this; }
+    };
+    try {
+        const mod = freshPlugin();
+        mod._setPopupsForTest([['docked', { popup: {} }], ['closed', { popup: {} }]]);
+        mod._setStartingForTest(true);
+        mod._ensureMainBroadcasterAndListener();
+        channel.onmessage({ data: { type: 'docked', popupId: 'docked', finalState: { arrName: 'Bass' } } });
+        channel.onmessage({ data: { type: 'closed', popupId: 'closed' } });
+        assert.deepEqual(mod._getPendingRedocksForTest(), [{ popupId: 'docked', finalState: { arrName: 'Bass' }, finalStates: null }]);
+        assert.equal(mod._getPopupsForTest().has('docked'), true,
+            'a queued redock keeps its popup entry until the start finishes');
+        assert.equal(mod._getPopupsForTest().has('closed'), false,
+            'a plain closed message releases its popup entry immediately');
+    } finally {
+        global.BroadcastChannel = oldBroadcastChannel;
+    }
+});
+
+test('a closed message for a popup with a queued redock keeps its entry', () => {
+    const oldBroadcastChannel = global.BroadcastChannel;
+    let channel = null;
+    global.BroadcastChannel = class {
+        constructor() { channel = this; }
+    };
+    try {
+        const mod = freshPlugin();
+        mod._setPopupsForTest([['docked', { popup: {} }]]);
+        mod._setStartingForTest(true);
+        mod._ensureMainBroadcasterAndListener();
+        // `docked` while a start is in flight defers the redock; an old popup
+        // build then also posts `closed` for the same popupId. The
+        // belt-and-suspenders guard must not drop the entry the deferred
+        // redock needs.
+        channel.onmessage({ data: { type: 'docked', popupId: 'docked', finalState: { arrName: 'Bass' } } });
+        channel.onmessage({ data: { type: 'closed', popupId: 'docked' } });
+        assert.equal(mod._getPendingRedocksForTest().length, 1,
+            'the docked message must still be queued for the deferred redock');
+        assert.equal(mod._getPopupsForTest().has('docked'), true,
+            'a closed after a queued redock must not drop the entry the deferred redock needs');
+    } finally {
+        global.BroadcastChannel = oldBroadcastChannel;
+    }
+});
+
 // ── _redockPanel deferral while a start is in flight ────────────────────────
 
 test('_redockPanel defers into _pendingRedocks when a start is in flight', () => {
