@@ -2389,6 +2389,45 @@ test('startSplitScreen installs the panel-specific hw.resize override before cal
     }
 });
 
+// ── rebuildLayout's _pendingRebuild deferral (splitscreen#54) ──────────────
+// Part of #54's scope ("Main-side _pendingRedocks/_pendingRebuild deferral
+// when a start is in flight") that had zero coverage — rebuildLayout itself
+// was never exercised by the suite before this. A layout change requested
+// while startSplitScreen is still awaiting (e.g. _vizPluginsReady) must not
+// race the in-flight panel build by tearing it down immediately; it defers
+// into _pendingRebuild and that start's own `finally` (screen.js ~line 3484)
+// drains it once, restarting the layout for real.
+
+test('rebuildLayout defers via _pendingRebuild when a start is in flight, drained once by that start\'s finally', async () => {
+    const mod = freshLifecyclePlugin();
+    let createHighwayCalls = 0;
+    global.createHighway = () => {
+        createHighwayCalls++;
+        return {
+            init() {}, stop() {}, connect() {}, resize() {}, getRenderScale: () => 1,
+            getInverted: () => false, getLefty: () => false, getMastery: () => 1,
+            setInverted() {}, setLefty() {}, setMastery() {}, setRenderer() {}, setLyricsVisible() {},
+        };
+    };
+    try {
+        await mod._getVizPluginsReadyForTest();
+        const p = mod.startSplitScreen([0, 1]); // not awaited — still "starting"
+        mod.rebuildLayout();
+        assert.equal(mod._getPendingRebuildForTest(), true,
+            'a rebuild requested mid-start must be recorded as pending, not run immediately');
+        assert.equal(createHighwayCalls, 0, 'deferring must not tear down/rebuild before the in-flight start finishes');
+
+        await p;
+        await new Promise((r) => setTimeout(r, 50)); // let the drained rebuild's fire-and-forget startSplitScreen settle
+        assert.equal(mod._getPendingRebuildForTest(), false, 'the pending flag must be cleared once drained');
+        assert.equal(createHighwayCalls, 4,
+            'exactly one drained rebuild must run after the start finishes (2 panels for the initial start + 2 for the rebuild)');
+    } finally {
+        delete global.createHighway;
+        await mod.stopSplitScreen();
+    }
+});
+
 // Note: startSplitScreen's panel loop overwrites hw.resize with its OWN
 // closure (the "installs the override" test above) before sizeCanvases()
 // ever runs — so a fake highway's own resize() method never actually fires;
@@ -2665,5 +2704,366 @@ test('the in-place viz-to-viz switch (panel.select.onchange) installs the new pl
         delete global.window.feedBackViz_vizA;
         delete global.window.feedBackViz_vizB;
         delete global.createHighway;
+    }
+});
+
+// ── _handleFollowerSongChange single-flight coalescing (splitscreen#54) ────
+// #59 covered the orphaned early-return only. These tests stand up a full
+// (if minimal) follower rebuild stack — via the same makeLifecycleEl DOM
+// stub startSplitScreen's lifecycle tests use, plus an 'audio' element and a
+// stubbed window.playSong — so _handleFollowerSongChange's real body runs
+// end to end instead of failing before its single-flight guard matters.
+//
+// window.playSong is the one signal that distinguishes "a rebuild actually
+// ran for filename X" from "it didn't": loadSongInFollower awaits it first
+// thing, so spying on it (via the plugin's own window.playSong wrapper,
+// which calls through to whatever was on window.playSong before the plugin
+// loaded) gives an ordered, per-filename trace of every rebuild that ran.
+//
+// BroadcastChannel must be deleted for these tests — buildFollowerLayout
+// subscribes a real (non-remote) follower to `_ssChannel()`, and Node's
+// real global BroadcastChannel keeps the event loop alive once opened,
+// hanging the run (only visible under `node --test`; a script that calls
+// process.exit() masks it). Same hazard the LAN-share section above
+// documents for _ensureMainBroadcasterAndListener.
+
+function freshFollowerRebuildPlugin(playSongCalls) {
+    const registry = new Map();
+    for (const id of [...LIFECYCLE_KNOWN_IDS, 'audio']) registry.set(id, makeLifecycleEl('div'));
+    const audioEl = registry.get('audio');
+    audioEl.muted = false;
+    audioEl.volume = 1;
+    audioEl.paused = true;
+    audioEl.pause = function () { this.paused = true; };
+
+    const location = { search: '', host: 'localhost:8420', protocol: 'http:' };
+    global.window = {
+        location, addEventListener() {}, feedBack: null,
+        playSong: async (f) => { playSongCalls.push(f); },
+    };
+    global.location = location;
+    global.document = {
+        getElementById: (id) => registry.get(id) || null,
+        addEventListener() {},
+        body: makeLifecycleEl('body'),
+        createElement: (tag) => makeLifecycleEl(tag),
+        readyState: 'loading',
+    };
+    global.localStorage = makeLocalStorage();
+    global.highway = {
+        getSongInfo: () => ({ arrangements: [{ name: 'Lead', index: 0 }] }),
+        setTime() {},
+    };
+    global.createHighway = () => ({
+        init() {}, stop() {}, connect() {}, resize() {}, setTime() {},
+        getRenderScale: () => 1,
+        getInverted: () => false, getLefty: () => false, getMastery: () => 1,
+        setInverted() {}, setLefty() {}, setMastery() {}, setRenderer() {}, setLyricsVisible() {},
+    });
+    return loadPlugin();
+}
+
+test('_handleFollowerSongChange coalesces a song-change that arrives mid-rebuild instead of starting a second overlapping rebuild', async () => {
+    const originalRaf = global.requestAnimationFrame;
+    const originalCaf = global.cancelAnimationFrame;
+    const originalBC = global.BroadcastChannel;
+    global.requestAnimationFrame = () => 1;
+    global.cancelAnimationFrame = () => {};
+    delete global.BroadcastChannel;
+
+    const playSongCalls = [];
+    try {
+        const mod = freshFollowerRebuildPlugin(playSongCalls);
+        await mod._getVizPluginsReadyForTest();
+        mod._setPanelsForTest([]);
+        mod._setWrapForTest(null);
+        mod._setCurrentFilenameForTest('a.sloppak');
+        mod._setFollowerForTest({ remote: false, popupId: 'p1' });
+        mod._setFollowerOrphanedForTest(false);
+
+        const p1 = mod._handleFollowerSongChange('b.sloppak');
+        // Fired synchronously while call 1 is still busy (it doesn't hit its
+        // own first await until inside loadSongInFollower's window.playSong
+        // call) — must coalesce, not run immediately.
+        mod._handleFollowerSongChange('c.sloppak');
+        assert.equal(mod._getFollowerPendingFilenameForTest(), 'c.sloppak',
+            'a song-change arriving while busy must be recorded as pending, not run');
+        assert.equal(mod._getFollowerRebuildBusyForTest(), true, 'the first rebuild must still be marked busy');
+        assert.deepEqual(playSongCalls, ['b.sloppak'], 'the pending filename must not start its own rebuild yet');
+
+        await p1;
+        await new Promise((r) => setTimeout(r, 50)); // let the coalesced follow-up rebuild run
+        assert.deepEqual(playSongCalls, ['b.sloppak', 'c.sloppak'],
+            'the coalesced filename must run exactly once, after the in-flight rebuild finishes');
+        assert.equal(mod._getFollowerPendingFilenameForTest(), null);
+    } finally {
+        global.requestAnimationFrame = originalRaf;
+        global.cancelAnimationFrame = originalCaf;
+        if (originalBC === undefined) delete global.BroadcastChannel; else global.BroadcastChannel = originalBC;
+    }
+});
+
+test('_handleFollowerSongChange keeps only the LATEST coalesced filename — an intermediate one is dropped', async () => {
+    const originalRaf = global.requestAnimationFrame;
+    const originalCaf = global.cancelAnimationFrame;
+    const originalBC = global.BroadcastChannel;
+    global.requestAnimationFrame = () => 1;
+    global.cancelAnimationFrame = () => {};
+    delete global.BroadcastChannel;
+
+    const playSongCalls = [];
+    try {
+        const mod = freshFollowerRebuildPlugin(playSongCalls);
+        await mod._getVizPluginsReadyForTest();
+        mod._setPanelsForTest([]);
+        mod._setWrapForTest(null);
+        mod._setCurrentFilenameForTest('a.sloppak');
+        mod._setFollowerForTest({ remote: false, popupId: 'p1' });
+        mod._setFollowerOrphanedForTest(false);
+
+        const p1 = mod._handleFollowerSongChange('b.sloppak');
+        mod._handleFollowerSongChange('c.sloppak'); // coalesced, then overwritten
+        mod._handleFollowerSongChange('d.sloppak'); // must replace 'c' as the pending filename
+        assert.equal(mod._getFollowerPendingFilenameForTest(), 'd.sloppak');
+
+        await p1;
+        await new Promise((r) => setTimeout(r, 50));
+        assert.deepEqual(playSongCalls, ['b.sloppak', 'd.sloppak'],
+            'only the latest coalesced filename must run — an intermediate one arriving mid-rebuild is dropped, not queued');
+    } finally {
+        global.requestAnimationFrame = originalRaf;
+        global.cancelAnimationFrame = originalCaf;
+        if (originalBC === undefined) delete global.BroadcastChannel; else global.BroadcastChannel = originalBC;
+    }
+});
+
+// ── Main-window docked/closed BroadcastChannel dispatch (splitscreen#54) ───
+// _redockPanel itself is already covered directly. What's new here is the
+// _ensureMainBroadcasterAndListener → ch.onmessage dispatcher that decides
+// WHEN to call it (and when to drop a popups entry outright) from a raw
+// 'docked'/'closed' message — that parsing/routing layer had no coverage.
+
+function makeTrackingBC(instances) {
+    return function FakeBC() {
+        this.postMessage = noop;
+        this.close = noop;
+        instances.push(this);
+    };
+}
+
+test('_ensureMainBroadcasterAndListener dispatches a docked message to _redockPanel with its finalState/finalStates', () => {
+    const mod = freshPlugin();
+    const instances = [];
+    global.BroadcastChannel = makeTrackingBC(instances);
+    try {
+        mod._setStartingForTest(true); // forces _redockPanel to defer into _pendingRedocks, observable without a real restart
+        mod._setPopupsForTest([['pop-1', { popup: {} }]]);
+        mod._ensureMainBroadcasterAndListener();
+        assert.equal(instances.length, 1);
+
+        instances[0].onmessage({ data: { type: 'docked', popupId: 'pop-1', finalState: { some: 'state' }, finalStates: null } });
+
+        const pending = mod._getPendingRedocksForTest();
+        assert.equal(pending.length, 1);
+        assert.equal(pending[0].popupId, 'pop-1');
+        assert.deepEqual(pending[0].finalState, { some: 'state' },
+            'the dispatcher must forward the message\'s finalState through to _redockPanel unchanged');
+    } finally {
+        delete global.BroadcastChannel;
+    }
+});
+
+test('_ensureMainBroadcasterAndListener ignores a docked message for a popupId it doesn\'t know about', () => {
+    const mod = freshPlugin();
+    const instances = [];
+    global.BroadcastChannel = makeTrackingBC(instances);
+    try {
+        mod._setStartingForTest(true);
+        mod._setPopupsForTest([]); // no known popups
+        mod._ensureMainBroadcasterAndListener();
+        instances[0].onmessage({ data: { type: 'docked', popupId: 'unknown', finalState: null, finalStates: null } });
+        assert.equal(mod._getPendingRedocksForTest().length, 0, 'an unrecognized popupId must not be redocked');
+    } finally {
+        delete global.BroadcastChannel;
+    }
+});
+
+test('_ensureMainBroadcasterAndListener drops the popups entry on a closed message when no redock is pending', () => {
+    const mod = freshPlugin();
+    const instances = [];
+    global.BroadcastChannel = makeTrackingBC(instances);
+    try {
+        mod._setPopupsForTest([['pop-2', { popup: {} }]]);
+        mod._ensureMainBroadcasterAndListener();
+        instances[0].onmessage({ data: { type: 'closed', popupId: 'pop-2' } });
+        assert.equal(mod._getPopupsForTest().has('pop-2'), false);
+    } finally {
+        delete global.BroadcastChannel;
+    }
+});
+
+test('_ensureMainBroadcasterAndListener does NOT drop the popups entry on a closed message when a redock is already pending for it', () => {
+    const mod = freshPlugin();
+    const instances = [];
+    global.BroadcastChannel = makeTrackingBC(instances);
+    try {
+        // First, a 'docked' message arrives while a start is in flight, queuing
+        // a pending redock for pop-3 without dropping the popups entry (per
+        // _redockPanel's own deferral behavior, already covered elsewhere).
+        mod._setStartingForTest(true);
+        mod._setPopupsForTest([['pop-3', { popup: {} }]]);
+        mod._ensureMainBroadcasterAndListener();
+        instances[0].onmessage({ data: { type: 'docked', popupId: 'pop-3', finalState: null, finalStates: null } });
+        assert.equal(mod._getPendingRedocksForTest().length, 1, 'sanity: a redock is now pending for pop-3');
+
+        // An older-build popup belt-and-suspenders 'closed' post for the same
+        // popup must NOT drop the entry — the pending redock still needs it.
+        instances[0].onmessage({ data: { type: 'closed', popupId: 'pop-3' } });
+        assert.equal(mod._getPopupsForTest().has('pop-3'), true,
+            'a closed message must not drop a popups entry that already has a redock pending for it');
+    } finally {
+        delete global.BroadcastChannel;
+    }
+});
+
+// ── Follower clock interpolation (splitscreen#54) ───────────────────────────
+// _onFollowerTimeMessage derives _followerObservedRate from consecutive
+// `time` broadcast deltas; _startFollowerInterp extrapolates
+// _followerCurrentTime forward from that rate between broadcasts, capped at
+// _FOLLOWER_MAX_EXTRAP_S. Only the basic time-set + playing-flag behavior of
+// _followerBusHandler's 'time' branch was covered before this (see #59).
+
+test('_onFollowerTimeMessage derives observedRate from consecutive time deltas (tracks the speed slider)', () => {
+    const originalPerf = global.performance;
+    let fakeNow = 1000;
+    global.performance = { now: () => fakeNow };
+    try {
+        const mod = freshPlugin();
+        mod._followerBusHandler({ type: 'time', t: 10, playing: true }); // first message — no prior anchor, rate stays default 1
+        assert.equal(mod._getFollowerObservedRateForTest(), 1);
+
+        fakeNow += 1000; // 1s of wall-clock later
+        mod._followerBusHandler({ type: 'time', t: 11.5, playing: true }); // 1.5s of chart time in 1s of wall time
+        assert.equal(mod._getFollowerObservedRateForTest(), 1.5);
+    } finally {
+        global.performance = originalPerf;
+    }
+});
+
+test('_onFollowerTimeMessage resets observedRate to 1 on an out-of-band jump (seek forward, loop wrap, or a long gap)', () => {
+    const originalPerf = global.performance;
+    let fakeNow = 1000;
+    global.performance = { now: () => fakeNow };
+    try {
+        const mod = freshPlugin();
+        mod._followerBusHandler({ type: 'time', t: 10, playing: true });
+        fakeNow += 1000;
+        mod._followerBusHandler({ type: 'time', t: 11.5, playing: true }); // establishes rate 1.5
+        assert.equal(mod._getFollowerObservedRateForTest(), 1.5);
+
+        fakeNow += 1000;
+        mod._followerBusHandler({ type: 'time', t: 200, playing: true }); // huge forward jump — a seek, not real playback speed
+        assert.equal(mod._getFollowerObservedRateForTest(), 1, 'an out-of-band forward jump must snap the rate back to 1, not extrapolate the seek as a speed change');
+    } finally {
+        global.performance = originalPerf;
+    }
+});
+
+test('_onFollowerTimeMessage resets observedRate to 1 on a backward seek', () => {
+    const originalPerf = global.performance;
+    let fakeNow = 1000;
+    global.performance = { now: () => fakeNow };
+    try {
+        const mod = freshPlugin();
+        mod._followerBusHandler({ type: 'time', t: 10, playing: true });
+        fakeNow += 1000;
+        mod._followerBusHandler({ type: 'time', t: 11.5, playing: true });
+        assert.equal(mod._getFollowerObservedRateForTest(), 1.5);
+
+        fakeNow += 1000;
+        mod._followerBusHandler({ type: 'time', t: 2, playing: true }); // backward — a seek
+        assert.equal(mod._getFollowerObservedRateForTest(), 1);
+    } finally {
+        global.performance = originalPerf;
+    }
+});
+
+test('_startFollowerInterp extrapolates _followerCurrentTime forward using observedRate between time messages', () => {
+    const originalPerf = global.performance;
+    const originalRaf = global.requestAnimationFrame;
+    const originalCaf = global.cancelAnimationFrame;
+    let fakeNow = 1000;
+    let tick = null;
+    global.performance = { now: () => fakeNow };
+    global.requestAnimationFrame = (fn) => { tick = fn; return 1; };
+    global.cancelAnimationFrame = () => {};
+    try {
+        const mod = freshPlugin();
+        let sawTime = null;
+        mod._setPanelsForTest([makeFollowerPanel({ hw: { setTime: (t) => { sawTime = t; } } })]);
+
+        mod._followerBusHandler({ type: 'time', t: 10, playing: true }); // anchor: t=10 at fakeNow=1000, rate=1 (no prior anchor)
+        mod._startFollowerInterp();
+        assert.ok(tick, 'requestAnimationFrame must have armed the extrapolation loop');
+
+        fakeNow += 500; // half a second of wall-clock time passes with no new broadcast
+        tick();
+        assert.equal(mod._getFollowerCurrentTimeForTest(), 10.5, 'must extrapolate forward at the observed rate (1x here)');
+        assert.equal(sawTime, 10.5, 'every non-lyrics panel must be fanned the extrapolated time');
+    } finally {
+        global.performance = originalPerf;
+        global.requestAnimationFrame = originalRaf;
+        global.cancelAnimationFrame = originalCaf;
+    }
+});
+
+test('_startFollowerInterp stops extrapolating and flips _followerPlaying false once past _FOLLOWER_MAX_EXTRAP_S', () => {
+    const originalPerf = global.performance;
+    const originalRaf = global.requestAnimationFrame;
+    const originalCaf = global.cancelAnimationFrame;
+    let fakeNow = 1000;
+    let tick = null;
+    global.performance = { now: () => fakeNow };
+    global.requestAnimationFrame = (fn) => { tick = fn; return 1; };
+    global.cancelAnimationFrame = () => {};
+    try {
+        const mod = freshPlugin();
+        mod._setPanelsForTest([]);
+        mod._followerBusHandler({ type: 'time', t: 10, playing: true });
+        mod._startFollowerInterp();
+
+        fakeNow += 500;
+        tick();
+        assert.equal(mod._getFollowerCurrentTimeForTest(), 10.5);
+        assert.equal(mod._getFollowerPlayingForTest(), true);
+
+        fakeNow += 2500; // total wall gap since anchor now 3s, past the 2.0s backstop
+        tick();
+        assert.equal(mod._getFollowerPlayingForTest(), false,
+            'extrapolating past _FOLLOWER_MAX_EXTRAP_S with no new broadcast must be treated as a dropped pause message');
+        assert.equal(mod._getFollowerCurrentTimeForTest(), 10.5,
+            'the clock must park at the last good estimate, not keep advancing past the backstop');
+    } finally {
+        global.performance = originalPerf;
+        global.requestAnimationFrame = originalRaf;
+        global.cancelAnimationFrame = originalCaf;
+    }
+});
+
+test('_startFollowerInterp is idempotent — a second call while already running does not re-arm the rAF loop', () => {
+    const originalRaf = global.requestAnimationFrame;
+    const originalCaf = global.cancelAnimationFrame;
+    let armCount = 0;
+    global.requestAnimationFrame = () => { armCount++; return armCount; };
+    global.cancelAnimationFrame = () => {};
+    try {
+        const mod = freshPlugin();
+        mod._startFollowerInterp();
+        assert.equal(armCount, 1);
+        mod._startFollowerInterp();
+        assert.equal(armCount, 1, 'a second call while the loop is already running must not schedule a second rAF');
+    } finally {
+        global.requestAnimationFrame = originalRaf;
+        global.cancelAnimationFrame = originalCaf;
     }
 });

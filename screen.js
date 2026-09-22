@@ -5855,6 +5855,14 @@ try {
             _getPopupsForTest() { return popups; },
             _getFollowerCurrentTimeForTest() { return _followerCurrentTime; },
             _getRemoteWaitingShownForTest() { return _remoteWaitingShown; },
+            _ensureMainBroadcasterAndListener,
+            _startFollowerInterp,
+            _stopFollowerInterp,
+            _getFollowerObservedRateForTest() { return _followerObservedRate; },
+            _getFollowerPendingFilenameForTest() { return _followerPendingFilename; },
+            _getFollowerRebuildBusyForTest() { return _followerRebuildBusy; },
+            _getFollowerInterpRafForTest() { return _followerInterpRaf; },
+            _getPendingRebuildForTest() { return _pendingRebuild; },
         };
     }
 })();
