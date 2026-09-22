@@ -2258,3 +2258,218 @@ test('_panelRole does not misclassify an unrelated arrangement as karaoke', () =
     const panel = { arrIndex: 0, lyricsMode: false };
     assert.deepEqual(mod._panelRole(panel), { instrument: 'guitar', role: 'lead' });
 });
+
+// ── Panel lifecycle: startSplitScreen / initPanel / sizeCanvases call sites (splitscreen#52) ──
+//
+// CLAUDE.md's own "Common pitfalls" flags this exact ordering as fragile:
+// "hw.resize override must be set before hw.init() — the override happens in
+// startSplitScreen() before initPanel(). If you call initPanel first, the
+// highway will size itself to the full window on init and clobber siblings."
+// Nothing in the suite drove startSplitScreen() end-to-end before this
+// section — everything else tests already-exported units in isolation
+// (sizeCanvases, recreatePanelHighway) with hand-built panel fixtures.
+
+function makeLifecycleEl(tag) {
+    const el = {
+        tagName: String(tag || 'div').toUpperCase(),
+        style: {},
+        classList: { add() {}, remove() {}, contains() { return false; } },
+        children: [],
+        parentNode: null,
+        dataset: {},
+        attributes: {},
+        // getBoundingClientRect() (used for panelDiv sizing) and offsetHeight
+        // (used for the mini bar's height) are deliberately independent
+        // fields, not derived from each other — a real mini-bar is ~28-40px
+        // tall, much shorter than its containing panel, and collapsing both
+        // to the same number here would make barH == panel height, zeroing
+        // out every computed canvas height regardless of whether the real
+        // resize logic is correct.
+        _rect: { width: 200, height: 200, top: 0, left: 0 },
+        _offsetHeight: 28,
+        appendChild(child) { this.children.push(child); child.parentNode = this; return child; },
+        insertBefore(child) { this.children.push(child); child.parentNode = this; return child; },
+        removeChild(child) { this.children = this.children.filter(c => c !== child); return child; },
+        remove() { if (this.parentNode) this.parentNode.removeChild(this); },
+        addEventListener() {},
+        removeEventListener() {},
+        setAttribute(k, v) { this.attributes[k] = v; },
+        getAttribute(k) { return this.attributes[k]; },
+        getBoundingClientRect() { return this._rect; },
+        get offsetHeight() { return this._offsetHeight; },
+        get offsetWidth() { return this._rect.width; },
+        contains() { return false; },
+        closest() { return null; },
+        querySelector() { return null; },
+        querySelectorAll() { return []; },
+        value: '', checked: false, textContent: '', innerHTML: '',
+        options: [], selectedIndex: -1,
+        onclick: null, onchange: null, oninput: null,
+        getContext() { return {}; },
+    };
+    return el;
+}
+
+const LIFECYCLE_KNOWN_IDS = ['player', 'player-footer', 'player-controls', 'highway', 'section-map'];
+
+function freshLifecyclePlugin({ arrangements } = {}) {
+    const location = { search: '', host: 'localhost:8420', protocol: 'http:' };
+    const registry = new Map();
+    for (const id of LIFECYCLE_KNOWN_IDS) registry.set(id, makeLifecycleEl('div'));
+    global.window = { location, addEventListener() {}, feedBack: null };
+    global.location = location;
+    global.document = {
+        getElementById: (id) => registry.get(id) || null,
+        addEventListener() {},
+        body: makeLifecycleEl('body'),
+        createElement: (tag) => makeLifecycleEl(tag),
+        readyState: 'loading',
+    };
+    global.localStorage = makeLocalStorage();
+    global.highway = {
+        getSongInfo: () => ({
+            arrangements: arrangements || [{ name: 'Lead', index: 0 }, { name: 'Rhythm', index: 1 }],
+        }),
+    };
+    return loadPlugin();
+}
+
+// A fake highway whose init() records, at the moment it's called, whether
+// hw.resize is STILL the original function this factory installed (tagged
+// via `_original`) or has already been overwritten by startSplitScreen's
+// `hw.resize = function (measured) {...}` override. This makes the ordering
+// bug directly observable: a regression that calls initPanel() before
+// installing the override would leave `_original` on `this.resize` at the
+// moment init() runs.
+function makeOrderTrackingHighway(ops, tag) {
+    const originalResize = function originalResize() { ops.push({ tag, op: 'resize', original: true }); };
+    originalResize._original = true;
+    const hw = {
+        resize: originalResize,
+        init(canvas) {
+            ops.push({
+                tag, op: 'init', canvas,
+                resizeStillOriginal: hw.resize && hw.resize._original === true,
+            });
+        },
+        stop() { ops.push({ tag, op: 'stop' }); },
+        connect() {}, getRenderScale: () => 1,
+        getInverted: () => false, getLefty: () => false, getMastery: () => 1,
+        setInverted() {}, setLefty() {}, setMastery() {}, setRenderer() {}, setLyricsVisible() {},
+    };
+    return hw;
+}
+
+test('startSplitScreen installs the panel-specific hw.resize override before calling hw.init()', async () => {
+    const mod = freshLifecyclePlugin();
+    const ops = [];
+    let panelIndex = 0;
+    global.createHighway = () => makeOrderTrackingHighway(ops, panelIndex++);
+    try {
+        await mod._getVizPluginsReadyForTest();
+        await mod.startSplitScreen([0, 1]);
+        const initOps = ops.filter(o => o.op === 'init');
+        assert.equal(initOps.length, 2, 'hw.init() must run for both panels');
+        for (const o of initOps) {
+            assert.equal(o.resizeStillOriginal, false,
+                `panel ${o.tag}: hw.resize must already be startSplitScreen's override by the time hw.init() runs — ` +
+                'CLAUDE.md: "If you call initPanel first, the highway will size itself to the full window on init and clobber siblings."');
+        }
+    } finally {
+        delete global.createHighway;
+        await mod.stopSplitScreen();
+    }
+});
+
+// Note: startSplitScreen's panel loop overwrites hw.resize with its OWN
+// closure (the "installs the override" test above) before sizeCanvases()
+// ever runs — so a fake highway's own resize() method never actually fires;
+// sizeCanvases() always calls the real override. These two tests therefore
+// observe the override's real side effect (panel.canvas.width/height being
+// set from panelDiv.getBoundingClientRect() × getRenderScale()) rather than
+// spying on a highway method that gets clobbered before it matters.
+
+test('startSplitScreen calls sizeCanvases after every panel is initialized', async () => {
+    const mod = freshLifecyclePlugin();
+    global.createHighway = () => ({
+        init() {}, stop() {}, connect() {}, getRenderScale: () => 2,
+        getInverted: () => false, getLefty: () => false, getMastery: () => 1,
+        setInverted() {}, setLefty() {}, setMastery() {}, setRenderer() {}, setLyricsVisible() {},
+    });
+    try {
+        await mod._getVizPluginsReadyForTest();
+        await mod.startSplitScreen([0, 1]);
+        // Each fixture panelDiv reports a 200x200 rect (makeLifecycleEl's
+        // default _rect) with no bar height override, so a regression that
+        // dropped the sizeCanvases() call at the end of startSplitScreen
+        // would leave canvas.width/height at their construction-time
+        // defaults (0) instead of the scaled, resized values.
+        for (const p of mod._getPanelsForTest()) {
+            assert.ok(p.canvas.width > 0 && p.canvas.height > 0,
+                'sizeCanvases must have resized this panel\'s canvas after start, not left it at its default 0x0');
+        }
+    } finally {
+        delete global.createHighway;
+        await mod.stopSplitScreen();
+    }
+});
+
+test('toggleControlsVisibility calls sizeCanvases while split is active, not while inactive', async () => {
+    const mod = freshLifecyclePlugin();
+    global.createHighway = () => ({
+        init() {}, stop() {}, connect() {}, getRenderScale: () => 1,
+        getInverted: () => false, getLefty: () => false, getMastery: () => 1,
+        setInverted() {}, setLefty() {}, setMastery() {}, setRenderer() {}, setLyricsVisible() {},
+    });
+    try {
+        // Inactive: toggling must not throw or touch panel sizing (there is
+        // no wrap/panels yet) — sizeCanvases()'s own `if (!wrap ...) return`
+        // guard is what should make this safe.
+        assert.doesNotThrow(() => mod.toggleControlsVisibility());
+
+        await mod._getVizPluginsReadyForTest();
+        await mod.startSplitScreen([0, 1]);
+        const panel = mod._getPanelsForTest()[0];
+        const afterStartWidth = panel.canvas.width;
+        assert.ok(afterStartWidth > 0, 'sanity: starting split already resized the panel once');
+
+        // Shrink the panel's reported rect, then toggle — if
+        // toggleControlsVisibility() calls sizeCanvases() again, the new
+        // (smaller) rect must be picked up; if the call were dropped, the
+        // canvas would still report the original start-time size.
+        panel.panelDiv._rect = { width: 50, height: 50, top: 0, left: 0 };
+        mod.toggleControlsVisibility();
+        assert.notEqual(panel.canvas.width, afterStartWidth,
+            'toggling controls while active must call sizeCanvases again and pick up the new rect');
+    } finally {
+        delete global.createHighway;
+        await mod.stopSplitScreen();
+    }
+});
+
+test('initPanel sets the documented default panel object shape (mode flags null/false)', async () => {
+    const mod = freshLifecyclePlugin();
+    global.createHighway = () => ({
+        resize() {}, init() {}, stop() {}, connect() {}, getRenderScale: () => 1,
+        getInverted: () => false, getLefty: () => false, getMastery: () => 1,
+        setInverted() {}, setLefty() {}, setMastery() {}, setRenderer() {}, setLyricsVisible() {},
+    });
+    try {
+        await mod._getVizPluginsReadyForTest();
+        await mod.startSplitScreen([0, 1]);
+        // CLAUDE.md's panel object shape table: lyricsMode/vizMode start
+        // false/null for a plain (non-lyrics, non-viz) arrangement pick.
+        for (const p of mod._getPanelsForTest()) {
+            assert.equal(p.lyricsMode, false, 'a normal-highway panel must not start in lyrics mode');
+            assert.equal(p.lyricsPane, null);
+            assert.equal(p.lyricsOverlay, null);
+            assert.equal(p.lyricsOverlayOn, false);
+            assert.equal(p.chordsOverlay, null);
+            assert.equal(p.chordsOverlayOn, false);
+            assert.equal(p.vizMode, null, 'a normal-highway panel must not start in viz mode');
+        }
+    } finally {
+        delete global.createHighway;
+        await mod.stopSplitScreen();
+    }
+});
