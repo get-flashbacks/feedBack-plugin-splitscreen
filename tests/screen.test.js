@@ -2554,3 +2554,828 @@ test('_panelRole does not misclassify an unrelated arrangement as karaoke', () =
     const panel = { arrIndex: 0, lyricsMode: false };
     assert.deepEqual(mod._panelRole(panel), { instrument: 'guitar', role: 'lead' });
 });
+
+// ── Panel lifecycle: startSplitScreen / initPanel / sizeCanvases call sites (splitscreen#52) ──
+//
+// CLAUDE.md's own "Common pitfalls" flags this exact ordering as fragile:
+// "hw.resize override must be set before hw.init() — the override happens in
+// startSplitScreen() before initPanel(). If you call initPanel first, the
+// highway will size itself to the full window on init and clobber siblings."
+// Nothing in the suite drove startSplitScreen() end-to-end before this
+// section — everything else tests already-exported units in isolation
+// (sizeCanvases, recreatePanelHighway) with hand-built panel fixtures.
+
+function makeLifecycleEl(tag) {
+    const el = {
+        tagName: String(tag || 'div').toUpperCase(),
+        style: {},
+        classList: { add() {}, remove() {}, contains() { return false; } },
+        children: [],
+        parentNode: null,
+        dataset: {},
+        attributes: {},
+        // getBoundingClientRect() (used for panelDiv sizing) and offsetHeight
+        // (used for the mini bar's height) are deliberately independent
+        // fields, not derived from each other — a real mini-bar is ~28-40px
+        // tall, much shorter than its containing panel, and collapsing both
+        // to the same number here would make barH == panel height, zeroing
+        // out every computed canvas height regardless of whether the real
+        // resize logic is correct.
+        _rect: { width: 200, height: 200, top: 0, left: 0 },
+        _offsetHeight: 28,
+        appendChild(child) { this.children.push(child); child.parentNode = this; return child; },
+        insertBefore(child) { this.children.push(child); child.parentNode = this; return child; },
+        removeChild(child) { this.children = this.children.filter(c => c !== child); return child; },
+        remove() { if (this.parentNode) this.parentNode.removeChild(this); },
+        replaceWith(next) {
+            if (this.parentNode) {
+                const idx = this.parentNode.children.indexOf(this);
+                if (idx >= 0) this.parentNode.children[idx] = next;
+                next.parentNode = this.parentNode;
+            }
+            this.parentNode = null;
+        },
+        addEventListener() {},
+        removeEventListener() {},
+        setAttribute(k, v) { this.attributes[k] = v; },
+        getAttribute(k) { return this.attributes[k]; },
+        getBoundingClientRect() { return this._rect; },
+        get offsetHeight() { return this._offsetHeight; },
+        get offsetWidth() { return this._rect.width; },
+        contains() { return false; },
+        closest() { return null; },
+        querySelector() { return null; },
+        querySelectorAll() { return []; },
+        value: '', checked: false, textContent: '', innerHTML: '',
+        options: [], selectedIndex: -1,
+        onclick: null, onchange: null, oninput: null,
+        getContext() { return {}; },
+    };
+    return el;
+}
+
+const LIFECYCLE_KNOWN_IDS = ['player', 'player-footer', 'player-controls', 'highway', 'section-map'];
+
+function freshLifecyclePlugin({ arrangements } = {}) {
+    const location = { search: '', host: 'localhost:8420', protocol: 'http:' };
+    const registry = new Map();
+    for (const id of LIFECYCLE_KNOWN_IDS) registry.set(id, makeLifecycleEl('div'));
+    global.window = { location, addEventListener() {}, feedBack: null };
+    global.location = location;
+    global.document = {
+        getElementById: (id) => registry.get(id) || null,
+        addEventListener() {},
+        body: makeLifecycleEl('body'),
+        createElement: (tag) => makeLifecycleEl(tag),
+        readyState: 'loading',
+    };
+    global.localStorage = makeLocalStorage();
+    global.highway = {
+        getSongInfo: () => ({
+            arrangements: arrangements || [{ name: 'Lead', index: 0 }, { name: 'Rhythm', index: 1 }],
+        }),
+    };
+    return loadPlugin();
+}
+
+// A fake highway whose init() records, at the moment it's called, whether
+// hw.resize is STILL the original function this factory installed (tagged
+// via `_original`) or has already been overwritten by startSplitScreen's
+// `hw.resize = function (measured) {...}` override. This makes the ordering
+// bug directly observable: a regression that calls initPanel() before
+// installing the override would leave `_original` on `this.resize` at the
+// moment init() runs.
+function makeOrderTrackingHighway(ops, tag) {
+    const originalResize = function originalResize() { ops.push({ tag, op: 'resize', original: true }); };
+    originalResize._original = true;
+    const hw = {
+        resize: originalResize,
+        init(canvas) {
+            ops.push({
+                tag, op: 'init', canvas,
+                resizeStillOriginal: hw.resize && hw.resize._original === true,
+            });
+        },
+        stop() { ops.push({ tag, op: 'stop' }); },
+        connect() {}, getRenderScale: () => 1,
+        getInverted: () => false, getLefty: () => false, getMastery: () => 1,
+        setInverted() {}, setLefty() {}, setMastery() {}, setRenderer() {}, setLyricsVisible() {},
+    };
+    return hw;
+}
+
+test('startSplitScreen installs the panel-specific hw.resize override before calling hw.init()', async () => {
+    const mod = freshLifecyclePlugin();
+    const ops = [];
+    let panelIndex = 0;
+    global.createHighway = () => makeOrderTrackingHighway(ops, panelIndex++);
+    try {
+        await mod._getVizPluginsReadyForTest();
+        await mod.startSplitScreen([0, 1]);
+        const initOps = ops.filter(o => o.op === 'init');
+        assert.equal(initOps.length, 2, 'hw.init() must run for both panels');
+        for (const o of initOps) {
+            assert.equal(o.resizeStillOriginal, false,
+                `panel ${o.tag}: hw.resize must already be startSplitScreen's override by the time hw.init() runs — ` +
+                'CLAUDE.md: "If you call initPanel first, the highway will size itself to the full window on init and clobber siblings."');
+        }
+    } finally {
+        delete global.createHighway;
+        await mod.stopSplitScreen();
+    }
+});
+
+// ── rebuildLayout's _pendingRebuild deferral (splitscreen#54) ──────────────
+// Part of #54's scope ("Main-side _pendingRedocks/_pendingRebuild deferral
+// when a start is in flight") that had zero coverage — rebuildLayout itself
+// was never exercised by the suite before this. A layout change requested
+// while startSplitScreen is still awaiting (e.g. _vizPluginsReady) must not
+// race the in-flight panel build by tearing it down immediately; it defers
+// into _pendingRebuild and that start's own `finally` (screen.js ~line 3484)
+// drains it once, restarting the layout for real.
+
+test('rebuildLayout defers via _pendingRebuild when a start is in flight, drained once by that start\'s finally', async () => {
+    const mod = freshLifecyclePlugin();
+    let createHighwayCalls = 0;
+    global.createHighway = () => {
+        createHighwayCalls++;
+        return {
+            init() {}, stop() {}, connect() {}, resize() {}, getRenderScale: () => 1,
+            getInverted: () => false, getLefty: () => false, getMastery: () => 1,
+            setInverted() {}, setLefty() {}, setMastery() {}, setRenderer() {}, setLyricsVisible() {},
+        };
+    };
+    try {
+        await mod._getVizPluginsReadyForTest();
+        const p = mod.startSplitScreen([0, 1]); // not awaited — still "starting"
+        // `active` is also still false at this synchronous point (startSplitScreen
+        // hasn't reached the panel-build loop yet), so a broken guard that drops
+        // its `return` and falls through to the teardown/restart body would be
+        // indistinguishable from a correct deferral by createHighwayCalls alone
+        // (both stay 0, since the fall-through's own `if (wasActive) restart`
+        // check also short-circuits on the same false `active`). teardownPanels()
+        // itself, however, runs unconditionally on that fall-through path and
+        // bumps _ssRealStopGen — so that counter is the one signal that actually
+        // distinguishes "returned early" from "fell through and happened to no-op
+        // downstream". Confirmed by mutation: dropping only the `return` (keeping
+        // the `_pendingRebuild = true` assignment) left the createHighwayCalls-only
+        // version of this assertion green.
+        const stopGenBeforeRebuild = mod._getSsRealStopGenForTest();
+        mod.rebuildLayout();
+        assert.equal(mod._getPendingRebuildForTest(), true,
+            'a rebuild requested mid-start must be recorded as pending, not run immediately');
+        assert.equal(createHighwayCalls, 0, 'deferring must not tear down/rebuild before the in-flight start finishes');
+        assert.equal(mod._getSsRealStopGenForTest(), stopGenBeforeRebuild,
+            'the _starting guard must return before reaching teardownPanels() at all — falling through to it ' +
+            'and merely no-op-ing downstream is not the same as deferring');
+
+        await p;
+        await new Promise((r) => setTimeout(r, 50)); // let the drained rebuild's fire-and-forget startSplitScreen settle
+        assert.equal(mod._getPendingRebuildForTest(), false, 'the pending flag must be cleared once drained');
+        assert.equal(createHighwayCalls, 4,
+            'exactly one drained rebuild must run after the start finishes (2 panels for the initial start + 2 for the rebuild)');
+    } finally {
+        delete global.createHighway;
+        await mod.stopSplitScreen();
+    }
+});
+
+// Note: startSplitScreen's panel loop overwrites hw.resize with its OWN
+// closure (the "installs the override" test above) before sizeCanvases()
+// ever runs — so a fake highway's own resize() method never actually fires;
+// sizeCanvases() always calls the real override. These two tests therefore
+// observe the override's real side effect (panel.canvas.width/height being
+// set from panelDiv.getBoundingClientRect() × getRenderScale()) rather than
+// spying on a highway method that gets clobbered before it matters.
+
+test('startSplitScreen calls sizeCanvases after every panel is initialized', async () => {
+    const mod = freshLifecyclePlugin();
+    global.createHighway = () => ({
+        init() {}, stop() {}, connect() {}, getRenderScale: () => 2,
+        getInverted: () => false, getLefty: () => false, getMastery: () => 1,
+        setInverted() {}, setLefty() {}, setMastery() {}, setRenderer() {}, setLyricsVisible() {},
+    });
+    try {
+        await mod._getVizPluginsReadyForTest();
+        await mod.startSplitScreen([0, 1]);
+        // Each fixture panelDiv reports a 200x200 rect (makeLifecycleEl's
+        // default _rect) with no bar height override, so a regression that
+        // dropped the sizeCanvases() call at the end of startSplitScreen
+        // would leave canvas.width/height at their construction-time
+        // defaults (0) instead of the scaled, resized values.
+        for (const p of mod._getPanelsForTest()) {
+            assert.ok(p.canvas.width > 0 && p.canvas.height > 0,
+                'sizeCanvases must have resized this panel\'s canvas after start, not left it at its default 0x0');
+        }
+    } finally {
+        delete global.createHighway;
+        await mod.stopSplitScreen();
+    }
+});
+
+test('toggleControlsVisibility calls sizeCanvases while split is active, not while inactive', async () => {
+    const mod = freshLifecyclePlugin();
+    global.createHighway = () => ({
+        init() {}, stop() {}, connect() {}, getRenderScale: () => 1,
+        getInverted: () => false, getLefty: () => false, getMastery: () => 1,
+        setInverted() {}, setLefty() {}, setMastery() {}, setRenderer() {}, setLyricsVisible() {},
+    });
+    try {
+        // Inactive: toggling must not throw or touch panel sizing (there is
+        // no wrap/panels yet) — sizeCanvases()'s own `if (!wrap ...) return`
+        // guard is what should make this safe.
+        assert.doesNotThrow(() => mod.toggleControlsVisibility());
+
+        await mod._getVizPluginsReadyForTest();
+        await mod.startSplitScreen([0, 1]);
+        const panel = mod._getPanelsForTest()[0];
+        const afterStartWidth = panel.canvas.width;
+        assert.ok(afterStartWidth > 0, 'sanity: starting split already resized the panel once');
+
+        // Shrink the panel's reported rect, then toggle — if
+        // toggleControlsVisibility() calls sizeCanvases() again, the new
+        // (smaller) rect must be picked up; if the call were dropped, the
+        // canvas would still report the original start-time size.
+        panel.panelDiv._rect = { width: 50, height: 50, top: 0, left: 0 };
+        mod.toggleControlsVisibility();
+        assert.notEqual(panel.canvas.width, afterStartWidth,
+            'toggling controls while active must call sizeCanvases again and pick up the new rect');
+    } finally {
+        delete global.createHighway;
+        await mod.stopSplitScreen();
+    }
+});
+
+test('initPanel sets the documented default panel object shape (mode flags null/false)', async () => {
+    const mod = freshLifecyclePlugin();
+    global.createHighway = () => ({
+        resize() {}, init() {}, stop() {}, connect() {}, getRenderScale: () => 1,
+        getInverted: () => false, getLefty: () => false, getMastery: () => 1,
+        setInverted() {}, setLefty() {}, setMastery() {}, setRenderer() {}, setLyricsVisible() {},
+    });
+    try {
+        await mod._getVizPluginsReadyForTest();
+        await mod.startSplitScreen([0, 1]);
+        // CLAUDE.md's panel object shape table: lyricsMode/vizMode start
+        // false/null for a plain (non-lyrics, non-viz) arrangement pick.
+        for (const p of mod._getPanelsForTest()) {
+            assert.equal(p.lyricsMode, false, 'a normal-highway panel must not start in lyrics mode');
+            assert.equal(p.lyricsPane, null);
+            assert.equal(p.lyricsOverlay, null);
+            assert.equal(p.lyricsOverlayOn, false);
+            assert.equal(p.chordsOverlay, null);
+            assert.equal(p.chordsOverlayOn, false);
+            assert.equal(p.vizMode, null, 'a normal-highway panel must not start in viz mode');
+        }
+    } finally {
+        delete global.createHighway;
+        await mod.stopSplitScreen();
+    }
+});
+
+// ── Panel render-mode transitions and mutual exclusivity (splitscreen#53) ──
+//
+// CLAUDE.md: "Each panel is always in exactly one of these modes. Flags are
+// mutually exclusive: entering one exits the others." Nothing in the suite
+// previously drove enterLyricsMode/enterVizMode/exitVizMode/exitLyricsMode
+// directly — recreatePanelHighway (which these call internally) already has
+// its own dedicated coverage; these tests target the mode-flag bookkeeping
+// layer sitting on top of it.
+
+function stubBrowserGlobalsForModeTransitions() {
+    const originalWebSocket = global.WebSocket;
+    const originalRaf = global.requestAnimationFrame;
+    const originalCaf = global.cancelAnimationFrame;
+    // createLyricsPane's connect() does `new WebSocket(...)` with no
+    // try/catch and `requestAnimationFrame(render)` — neither exists in
+    // bare Node, and modern Node DOES ship a real global WebSocket that
+    // would otherwise attempt a genuine (doomed) network connection to
+    // localhost:8420 (same class of hazard CLAUDE.md's "Test-env note"
+    // documents for the remote-join path). Stub both for the duration.
+    global.WebSocket = function (url) { return new FakeWebSocket(0); };
+    global.requestAnimationFrame = () => 1;
+    global.cancelAnimationFrame = () => {};
+    return function restore() {
+        global.WebSocket = originalWebSocket;
+        global.requestAnimationFrame = originalRaf;
+        global.cancelAnimationFrame = originalCaf;
+    };
+}
+
+function makeFakeVizFactory({ contextType = '2d' } = {}) {
+    const fn = () => ({
+        contextType,
+        init() {}, draw() {}, destroy() {}, resize() {},
+    });
+    return fn;
+}
+
+test('enterLyricsMode exits an active viz mode first (mutual exclusivity)', async () => {
+    const mod = freshLifecyclePlugin();
+    global.createHighway = () => ({
+        init() {}, stop() {}, connect() {}, getRenderScale: () => 1,
+        getInverted: () => false, getLefty: () => false, getMastery: () => 1,
+        setInverted() {}, setLefty() {}, setMastery() {}, setRenderer() {}, setLyricsVisible() {},
+    });
+    global.window.feedBackViz_myviz = makeFakeVizFactory();
+    const restore = stubBrowserGlobalsForModeTransitions();
+    try {
+        await mod._getVizPluginsReadyForTest();
+        await mod.startSplitScreen([0, 1]);
+        const panel = mod._getPanelsForTest()[0];
+
+        mod.enterVizMode(panel, 'myviz');
+        assert.equal(panel.vizMode, 'myviz', 'sanity: panel entered viz mode');
+        assert.equal(panel.lyricsMode, false);
+
+        mod.enterLyricsMode(panel);
+        assert.equal(panel.lyricsMode, true, 'entering lyrics mode must actually take effect');
+        assert.equal(panel.vizMode, null, 'entering lyrics mode must exit the prior viz mode, not stack on top of it');
+    } finally {
+        await mod.stopSplitScreen();
+        restore();
+        delete global.window.feedBackViz_myviz;
+        delete global.createHighway;
+    }
+});
+
+test('enterVizMode exits an active lyrics mode first (mutual exclusivity)', async () => {
+    const mod = freshLifecyclePlugin();
+    global.createHighway = () => ({
+        init() {}, stop() {}, connect() {}, getRenderScale: () => 1,
+        getInverted: () => false, getLefty: () => false, getMastery: () => 1,
+        setInverted() {}, setLefty() {}, setMastery() {}, setRenderer() {}, setLyricsVisible() {},
+    });
+    global.window.feedBackViz_myviz = makeFakeVizFactory();
+    const restore = stubBrowserGlobalsForModeTransitions();
+    try {
+        await mod._getVizPluginsReadyForTest();
+        await mod.startSplitScreen([0, 1]);
+        const panel = mod._getPanelsForTest()[0];
+
+        mod.enterLyricsMode(panel);
+        assert.equal(panel.lyricsMode, true, 'sanity: panel entered lyrics mode');
+
+        mod.enterVizMode(panel, 'myviz');
+        assert.equal(panel.vizMode, 'myviz', 'entering viz mode must actually take effect');
+        assert.equal(panel.lyricsMode, false, 'entering viz mode must exit the prior lyrics mode, not stack on top of it');
+    } finally {
+        await mod.stopSplitScreen();
+        restore();
+        delete global.window.feedBackViz_myviz;
+        delete global.createHighway;
+    }
+});
+
+test('enterLyricsMode is a no-op when the panel is already in lyrics mode', async () => {
+    const mod = freshLifecyclePlugin();
+    global.createHighway = () => ({
+        init() {}, stop() {}, connect() {}, getRenderScale: () => 1,
+        getInverted: () => false, getLefty: () => false, getMastery: () => 1,
+        setInverted() {}, setLefty() {}, setMastery() {}, setRenderer() {}, setLyricsVisible() {},
+    });
+    const restore = stubBrowserGlobalsForModeTransitions();
+    try {
+        await mod._getVizPluginsReadyForTest();
+        await mod.startSplitScreen([0, 1]);
+        const panel = mod._getPanelsForTest()[0];
+
+        mod.enterLyricsMode(panel);
+        const firstPane = panel.lyricsPane;
+        assert.ok(firstPane, 'sanity: a lyrics pane was created');
+
+        mod.enterLyricsMode(panel);
+        assert.equal(panel.lyricsPane, firstPane,
+            'a second enterLyricsMode call on an already-lyrics panel must not tear down and recreate the pane');
+    } finally {
+        await mod.stopSplitScreen();
+        restore();
+        delete global.createHighway;
+    }
+});
+
+test('enterVizMode is a no-op when the panel is already in ANY viz mode, even a different plugin', async () => {
+    // This is exactly why the panel.select.onchange handler has its own
+    // separate in-place viz-to-viz switch branch instead of just calling
+    // enterVizMode again — enterVizMode's own `if (panel.vizMode) return;`
+    // guard makes a direct call a no-op regardless of which plugin is
+    // requested, by design (mirrors the lyrics no-op guard above).
+    const mod = freshLifecyclePlugin();
+    global.createHighway = () => ({
+        init() {}, stop() {}, connect() {}, getRenderScale: () => 1,
+        getInverted: () => false, getLefty: () => false, getMastery: () => 1,
+        setInverted() {}, setLefty() {}, setMastery() {}, setRenderer() {}, setLyricsVisible() {},
+    });
+    global.window.feedBackViz_vizA = makeFakeVizFactory();
+    global.window.feedBackViz_vizB = makeFakeVizFactory();
+    const restore = stubBrowserGlobalsForModeTransitions();
+    try {
+        await mod._getVizPluginsReadyForTest();
+        await mod.startSplitScreen([0, 1]);
+        const panel = mod._getPanelsForTest()[0];
+
+        mod.enterVizMode(panel, 'vizA');
+        assert.equal(panel.vizMode, 'vizA');
+
+        mod.enterVizMode(panel, 'vizB');
+        assert.equal(panel.vizMode, 'vizA', 'a direct enterVizMode call while already in viz mode must be a no-op');
+    } finally {
+        await mod.stopSplitScreen();
+        restore();
+        delete global.window.feedBackViz_vizA;
+        delete global.window.feedBackViz_vizB;
+        delete global.createHighway;
+    }
+});
+
+test('the in-place viz-to-viz switch (panel.select.onchange) installs the new plugin, unlike a direct enterVizMode call', async () => {
+    const mod = freshLifecyclePlugin();
+    global.createHighway = () => ({
+        init() {}, stop() {}, connect() {}, getRenderScale: () => 1,
+        getInverted: () => false, getLefty: () => false, getMastery: () => 1,
+        setInverted() {}, setLefty() {}, setMastery() {}, setRenderer() {}, setLyricsVisible() {},
+    });
+    global.window.feedBackViz_vizA = makeFakeVizFactory();
+    global.window.feedBackViz_vizB = makeFakeVizFactory();
+    const restore = stubBrowserGlobalsForModeTransitions();
+    try {
+        await mod._getVizPluginsReadyForTest();
+        await mod.startSplitScreen([0, 1]);
+        const panel = mod._getPanelsForTest()[0];
+
+        mod.enterVizMode(panel, 'vizA');
+        assert.equal(panel.vizMode, 'vizA', 'sanity: panel entered viz mode with vizA');
+
+        panel.select.value = '__viz__:vizB:' + panel.arrIndex;
+        panel.select.onchange();
+        assert.equal(panel.vizMode, 'vizB',
+            'the in-place select.onchange branch must actually switch plugins where a direct enterVizMode call would no-op');
+    } finally {
+        await mod.stopSplitScreen();
+        restore();
+        delete global.window.feedBackViz_vizA;
+        delete global.window.feedBackViz_vizB;
+        delete global.createHighway;
+    }
+});
+
+// ── _handleFollowerSongChange single-flight coalescing (splitscreen#54) ────
+// #59 covered the orphaned early-return only. These tests stand up a full
+// (if minimal) follower rebuild stack — via the same makeLifecycleEl DOM
+// stub startSplitScreen's lifecycle tests use, plus an 'audio' element and a
+// stubbed window.playSong — so _handleFollowerSongChange's real body runs
+// end to end instead of failing before its single-flight guard matters.
+//
+// window.playSong is the one signal that distinguishes "a rebuild actually
+// ran for filename X" from "it didn't": loadSongInFollower awaits it first
+// thing, so spying on it (via the plugin's own window.playSong wrapper,
+// which calls through to whatever was on window.playSong before the plugin
+// loaded) gives an ordered, per-filename trace of every rebuild that ran.
+//
+// BroadcastChannel must be deleted for these tests — buildFollowerLayout
+// subscribes a real (non-remote) follower to `_ssChannel()`, and Node's
+// real global BroadcastChannel keeps the event loop alive once opened,
+// hanging the run (only visible under `node --test`; a script that calls
+// process.exit() masks it). Same hazard the LAN-share section above
+// documents for _ensureMainBroadcasterAndListener.
+
+function freshFollowerRebuildPlugin(playSongCalls) {
+    const registry = new Map();
+    for (const id of [...LIFECYCLE_KNOWN_IDS, 'audio']) registry.set(id, makeLifecycleEl('div'));
+    const audioEl = registry.get('audio');
+    audioEl.muted = false;
+    audioEl.volume = 1;
+    audioEl.paused = true;
+    audioEl.pause = function () { this.paused = true; };
+
+    const location = { search: '', host: 'localhost:8420', protocol: 'http:' };
+    global.window = {
+        location, addEventListener() {}, feedBack: null,
+        playSong: async (f) => { playSongCalls.push(f); },
+    };
+    global.location = location;
+    global.document = {
+        getElementById: (id) => registry.get(id) || null,
+        addEventListener() {},
+        body: makeLifecycleEl('body'),
+        createElement: (tag) => makeLifecycleEl(tag),
+        readyState: 'loading',
+    };
+    global.localStorage = makeLocalStorage();
+    global.highway = {
+        getSongInfo: () => ({ arrangements: [{ name: 'Lead', index: 0 }] }),
+        setTime() {},
+    };
+    global.createHighway = () => ({
+        init() {}, stop() {}, connect() {}, resize() {}, setTime() {},
+        getRenderScale: () => 1,
+        getInverted: () => false, getLefty: () => false, getMastery: () => 1,
+        setInverted() {}, setLefty() {}, setMastery() {}, setRenderer() {}, setLyricsVisible() {},
+    });
+    return loadPlugin();
+}
+
+test('_handleFollowerSongChange coalesces a song-change that arrives mid-rebuild instead of starting a second overlapping rebuild', async () => {
+    const originalRaf = global.requestAnimationFrame;
+    const originalCaf = global.cancelAnimationFrame;
+    const originalBC = global.BroadcastChannel;
+    global.requestAnimationFrame = () => 1;
+    global.cancelAnimationFrame = () => {};
+    delete global.BroadcastChannel;
+
+    const playSongCalls = [];
+    try {
+        const mod = freshFollowerRebuildPlugin(playSongCalls);
+        await mod._getVizPluginsReadyForTest();
+        mod._setPanelsForTest([]);
+        mod._setWrapForTest(null);
+        mod._setCurrentFilenameForTest('a.sloppak');
+        mod._setFollowerForTest({ remote: false, popupId: 'p1' });
+        mod._setFollowerOrphanedForTest(false);
+
+        const p1 = mod._handleFollowerSongChange('b.sloppak');
+        // Fired synchronously while call 1 is still busy (it doesn't hit its
+        // own first await until inside loadSongInFollower's window.playSong
+        // call) — must coalesce, not run immediately.
+        mod._handleFollowerSongChange('c.sloppak');
+        assert.equal(mod._getFollowerPendingFilenameForTest(), 'c.sloppak',
+            'a song-change arriving while busy must be recorded as pending, not run');
+        assert.equal(mod._getFollowerRebuildBusyForTest(), true, 'the first rebuild must still be marked busy');
+        assert.deepEqual(playSongCalls, ['b.sloppak'], 'the pending filename must not start its own rebuild yet');
+
+        await p1;
+        await new Promise((r) => setTimeout(r, 50)); // let the coalesced follow-up rebuild run
+        assert.deepEqual(playSongCalls, ['b.sloppak', 'c.sloppak'],
+            'the coalesced filename must run exactly once, after the in-flight rebuild finishes');
+        assert.equal(mod._getFollowerPendingFilenameForTest(), null);
+    } finally {
+        global.requestAnimationFrame = originalRaf;
+        global.cancelAnimationFrame = originalCaf;
+        if (originalBC === undefined) delete global.BroadcastChannel; else global.BroadcastChannel = originalBC;
+    }
+});
+
+test('_handleFollowerSongChange keeps only the LATEST coalesced filename — an intermediate one is dropped', async () => {
+    const originalRaf = global.requestAnimationFrame;
+    const originalCaf = global.cancelAnimationFrame;
+    const originalBC = global.BroadcastChannel;
+    global.requestAnimationFrame = () => 1;
+    global.cancelAnimationFrame = () => {};
+    delete global.BroadcastChannel;
+
+    const playSongCalls = [];
+    try {
+        const mod = freshFollowerRebuildPlugin(playSongCalls);
+        await mod._getVizPluginsReadyForTest();
+        mod._setPanelsForTest([]);
+        mod._setWrapForTest(null);
+        mod._setCurrentFilenameForTest('a.sloppak');
+        mod._setFollowerForTest({ remote: false, popupId: 'p1' });
+        mod._setFollowerOrphanedForTest(false);
+
+        const p1 = mod._handleFollowerSongChange('b.sloppak');
+        mod._handleFollowerSongChange('c.sloppak'); // coalesced, then overwritten
+        mod._handleFollowerSongChange('d.sloppak'); // must replace 'c' as the pending filename
+        assert.equal(mod._getFollowerPendingFilenameForTest(), 'd.sloppak');
+
+        await p1;
+        await new Promise((r) => setTimeout(r, 50));
+        assert.deepEqual(playSongCalls, ['b.sloppak', 'd.sloppak'],
+            'only the latest coalesced filename must run — an intermediate one arriving mid-rebuild is dropped, not queued');
+    } finally {
+        global.requestAnimationFrame = originalRaf;
+        global.cancelAnimationFrame = originalCaf;
+        if (originalBC === undefined) delete global.BroadcastChannel; else global.BroadcastChannel = originalBC;
+    }
+});
+
+// ── Main-window docked/closed BroadcastChannel dispatch (splitscreen#54) ───
+// _redockPanel itself is already covered directly. What's new here is the
+// _ensureMainBroadcasterAndListener → ch.onmessage dispatcher that decides
+// WHEN to call it (and when to drop a popups entry outright) from a raw
+// 'docked'/'closed' message — that parsing/routing layer had no coverage.
+
+function makeTrackingBC(instances) {
+    return function FakeBC() {
+        this.postMessage = noop;
+        this.close = noop;
+        instances.push(this);
+    };
+}
+
+test('_ensureMainBroadcasterAndListener dispatches a docked message to _redockPanel with its finalState/finalStates', () => {
+    const mod = freshPlugin();
+    const instances = [];
+    global.BroadcastChannel = makeTrackingBC(instances);
+    try {
+        mod._setStartingForTest(true); // forces _redockPanel to defer into _pendingRedocks, observable without a real restart
+        mod._setPopupsForTest([['pop-1', { popup: {} }]]);
+        mod._ensureMainBroadcasterAndListener();
+        assert.equal(instances.length, 1);
+
+        instances[0].onmessage({ data: { type: 'docked', popupId: 'pop-1', finalState: { some: 'state' }, finalStates: null } });
+
+        const pending = mod._getPendingRedocksForTest();
+        assert.equal(pending.length, 1);
+        assert.equal(pending[0].popupId, 'pop-1');
+        assert.deepEqual(pending[0].finalState, { some: 'state' },
+            'the dispatcher must forward the message\'s finalState through to _redockPanel unchanged');
+    } finally {
+        delete global.BroadcastChannel;
+    }
+});
+
+test('_ensureMainBroadcasterAndListener ignores a docked message for a popupId it doesn\'t know about', () => {
+    const mod = freshPlugin();
+    const instances = [];
+    global.BroadcastChannel = makeTrackingBC(instances);
+    try {
+        mod._setStartingForTest(true);
+        mod._setPopupsForTest([]); // no known popups
+        mod._ensureMainBroadcasterAndListener();
+        instances[0].onmessage({ data: { type: 'docked', popupId: 'unknown', finalState: null, finalStates: null } });
+        assert.equal(mod._getPendingRedocksForTest().length, 0, 'an unrecognized popupId must not be redocked');
+    } finally {
+        delete global.BroadcastChannel;
+    }
+});
+
+test('_ensureMainBroadcasterAndListener drops the popups entry on a closed message when no redock is pending', () => {
+    const mod = freshPlugin();
+    const instances = [];
+    global.BroadcastChannel = makeTrackingBC(instances);
+    try {
+        mod._setPopupsForTest([['pop-2', { popup: {} }]]);
+        mod._ensureMainBroadcasterAndListener();
+        instances[0].onmessage({ data: { type: 'closed', popupId: 'pop-2' } });
+        assert.equal(mod._getPopupsForTest().has('pop-2'), false);
+    } finally {
+        delete global.BroadcastChannel;
+    }
+});
+
+test('_ensureMainBroadcasterAndListener does NOT drop the popups entry on a closed message when a redock is already pending for it', () => {
+    const mod = freshPlugin();
+    const instances = [];
+    global.BroadcastChannel = makeTrackingBC(instances);
+    try {
+        // First, a 'docked' message arrives while a start is in flight, queuing
+        // a pending redock for pop-3 without dropping the popups entry (per
+        // _redockPanel's own deferral behavior, already covered elsewhere).
+        mod._setStartingForTest(true);
+        mod._setPopupsForTest([['pop-3', { popup: {} }]]);
+        mod._ensureMainBroadcasterAndListener();
+        instances[0].onmessage({ data: { type: 'docked', popupId: 'pop-3', finalState: null, finalStates: null } });
+        assert.equal(mod._getPendingRedocksForTest().length, 1, 'sanity: a redock is now pending for pop-3');
+
+        // An older-build popup belt-and-suspenders 'closed' post for the same
+        // popup must NOT drop the entry — the pending redock still needs it.
+        instances[0].onmessage({ data: { type: 'closed', popupId: 'pop-3' } });
+        assert.equal(mod._getPopupsForTest().has('pop-3'), true,
+            'a closed message must not drop a popups entry that already has a redock pending for it');
+    } finally {
+        delete global.BroadcastChannel;
+    }
+});
+
+// ── Follower clock interpolation (splitscreen#54) ───────────────────────────
+// _onFollowerTimeMessage derives _followerObservedRate from consecutive
+// `time` broadcast deltas; _startFollowerInterp extrapolates
+// _followerCurrentTime forward from that rate between broadcasts, capped at
+// _FOLLOWER_MAX_EXTRAP_S. Only the basic time-set + playing-flag behavior of
+// _followerBusHandler's 'time' branch was covered before this (see #59).
+
+test('_onFollowerTimeMessage derives observedRate from consecutive time deltas (tracks the speed slider)', () => {
+    const originalPerf = global.performance;
+    let fakeNow = 1000;
+    global.performance = { now: () => fakeNow };
+    try {
+        const mod = freshPlugin();
+        mod._followerBusHandler({ type: 'time', t: 10, playing: true }); // first message — no prior anchor, rate stays default 1
+        assert.equal(mod._getFollowerObservedRateForTest(), 1);
+
+        fakeNow += 1000; // 1s of wall-clock later
+        mod._followerBusHandler({ type: 'time', t: 11.5, playing: true }); // 1.5s of chart time in 1s of wall time
+        assert.equal(mod._getFollowerObservedRateForTest(), 1.5);
+    } finally {
+        global.performance = originalPerf;
+    }
+});
+
+test('_onFollowerTimeMessage resets observedRate to 1 on an out-of-band jump (seek forward, loop wrap, or a long gap)', () => {
+    const originalPerf = global.performance;
+    let fakeNow = 1000;
+    global.performance = { now: () => fakeNow };
+    try {
+        const mod = freshPlugin();
+        mod._followerBusHandler({ type: 'time', t: 10, playing: true });
+        fakeNow += 1000;
+        mod._followerBusHandler({ type: 'time', t: 11.5, playing: true }); // establishes rate 1.5
+        assert.equal(mod._getFollowerObservedRateForTest(), 1.5);
+
+        fakeNow += 1000;
+        mod._followerBusHandler({ type: 'time', t: 200, playing: true }); // huge forward jump — a seek, not real playback speed
+        assert.equal(mod._getFollowerObservedRateForTest(), 1, 'an out-of-band forward jump must snap the rate back to 1, not extrapolate the seek as a speed change');
+    } finally {
+        global.performance = originalPerf;
+    }
+});
+
+test('_onFollowerTimeMessage resets observedRate to 1 on a backward seek', () => {
+    const originalPerf = global.performance;
+    let fakeNow = 1000;
+    global.performance = { now: () => fakeNow };
+    try {
+        const mod = freshPlugin();
+        mod._followerBusHandler({ type: 'time', t: 10, playing: true });
+        fakeNow += 1000;
+        mod._followerBusHandler({ type: 'time', t: 11.5, playing: true });
+        assert.equal(mod._getFollowerObservedRateForTest(), 1.5);
+
+        fakeNow += 1000;
+        mod._followerBusHandler({ type: 'time', t: 2, playing: true }); // backward — a seek
+        assert.equal(mod._getFollowerObservedRateForTest(), 1);
+    } finally {
+        global.performance = originalPerf;
+    }
+});
+
+test('_startFollowerInterp extrapolates _followerCurrentTime forward using observedRate between time messages', () => {
+    const originalPerf = global.performance;
+    const originalRaf = global.requestAnimationFrame;
+    const originalCaf = global.cancelAnimationFrame;
+    let fakeNow = 1000;
+    let tick = null;
+    global.performance = { now: () => fakeNow };
+    global.requestAnimationFrame = (fn) => { tick = fn; return 1; };
+    global.cancelAnimationFrame = () => {};
+    try {
+        const mod = freshPlugin();
+        let sawTime = null;
+        mod._setPanelsForTest([makeFollowerPanel({ hw: { setTime: (t) => { sawTime = t; } } })]);
+
+        mod._followerBusHandler({ type: 'time', t: 10, playing: true }); // anchor: t=10 at fakeNow=1000, rate=1 (no prior anchor)
+        mod._startFollowerInterp();
+        assert.ok(tick, 'requestAnimationFrame must have armed the extrapolation loop');
+
+        fakeNow += 500; // half a second of wall-clock time passes with no new broadcast
+        tick();
+        assert.equal(mod._getFollowerCurrentTimeForTest(), 10.5, 'must extrapolate forward at the observed rate (1x here)');
+        assert.equal(sawTime, 10.5, 'every non-lyrics panel must be fanned the extrapolated time');
+    } finally {
+        global.performance = originalPerf;
+        global.requestAnimationFrame = originalRaf;
+        global.cancelAnimationFrame = originalCaf;
+    }
+});
+
+test('_startFollowerInterp stops extrapolating and flips _followerPlaying false once past _FOLLOWER_MAX_EXTRAP_S', () => {
+    const originalPerf = global.performance;
+    const originalRaf = global.requestAnimationFrame;
+    const originalCaf = global.cancelAnimationFrame;
+    let fakeNow = 1000;
+    let tick = null;
+    global.performance = { now: () => fakeNow };
+    global.requestAnimationFrame = (fn) => { tick = fn; return 1; };
+    global.cancelAnimationFrame = () => {};
+    try {
+        const mod = freshPlugin();
+        mod._setPanelsForTest([]);
+        mod._followerBusHandler({ type: 'time', t: 10, playing: true });
+        mod._startFollowerInterp();
+
+        fakeNow += 500;
+        tick();
+        assert.equal(mod._getFollowerCurrentTimeForTest(), 10.5);
+        assert.equal(mod._getFollowerPlayingForTest(), true);
+
+        fakeNow += 2500; // total wall gap since anchor now 3s, past the 2.0s backstop
+        tick();
+        assert.equal(mod._getFollowerPlayingForTest(), false,
+            'extrapolating past _FOLLOWER_MAX_EXTRAP_S with no new broadcast must be treated as a dropped pause message');
+        assert.equal(mod._getFollowerCurrentTimeForTest(), 10.5,
+            'the clock must park at the last good estimate, not keep advancing past the backstop');
+    } finally {
+        global.performance = originalPerf;
+        global.requestAnimationFrame = originalRaf;
+        global.cancelAnimationFrame = originalCaf;
+    }
+});
+
+test('_startFollowerInterp is idempotent — a second call while already running does not re-arm the rAF loop', () => {
+    const originalRaf = global.requestAnimationFrame;
+    const originalCaf = global.cancelAnimationFrame;
+    let armCount = 0;
+    global.requestAnimationFrame = () => { armCount++; return armCount; };
+    global.cancelAnimationFrame = () => {};
+    try {
+        const mod = freshPlugin();
+        mod._startFollowerInterp();
+        assert.equal(armCount, 1);
+        mod._startFollowerInterp();
+        assert.equal(armCount, 1, 'a second call while the loop is already running must not schedule a second rAF');
+    } finally {
+        global.requestAnimationFrame = originalRaf;
+        global.cancelAnimationFrame = originalCaf;
+    }
+});

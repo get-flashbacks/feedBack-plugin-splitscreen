@@ -5809,9 +5809,14 @@ try {
             LAYOUTS, applyLayoutStyle, _bestFitLayout,
             _setArrangementsForTest(next) { arrangements = next; },
             _setPanelsForTest(next) { panels = next; },
+            _getPanelsForTest() { return panels; },
             _panelRole,
             sizeCanvases,
             recreatePanelHighway,
+            startSplitScreen,
+            stopSplitScreen,
+            toggleControlsVisibility,
+            rebuildLayout,
             // Render-mode transitions are exercised by the Node stub host.
             // These remain private browser implementation details; exporting
             // them here only exposes deterministic test seams.
@@ -5820,6 +5825,7 @@ try {
             enterVizMode,
             exitVizMode,
             initPanel,
+            _getVizPluginsReadyForTest() { return _vizPluginsReady; },
             _showVizControls,
             _hideVizControls,
             _closeAllVizPopovers,
@@ -5859,6 +5865,10 @@ try {
             _getPopupsForTest() { return popups; },
             _getFollowerCurrentTimeForTest() { return _followerCurrentTime; },
             _getRemoteWaitingShownForTest() { return _remoteWaitingShown; },
+            _getFollowerObservedRateForTest() { return _followerObservedRate; },
+            _getFollowerRebuildBusyForTest() { return _followerRebuildBusy; },
+            _getPendingRebuildForTest() { return _pendingRebuild; },
+            _getSsRealStopGenForTest() { return _ssRealStopGen; },
         };
     }
 })();
