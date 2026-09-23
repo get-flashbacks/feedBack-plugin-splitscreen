@@ -1246,6 +1246,161 @@ test('_handleFollowerSongChange does nothing once the follower is orphaned', asy
         'an orphaned follower must not enter the rebuild path');
 });
 
+test('_handleFollowerSongChange coalesces a second filename while a rebuild is in flight', async () => {
+    const mod = freshPlugin();
+    mod._setFollowerRebuildBusyForTest(true);
+    await mod._handleFollowerSongChange('latest.sloppak');
+    assert.equal(mod._getFollowerPendingFilenameForTest(), 'latest.sloppak',
+        'the later change must be retained for the current rebuild to consume');
+});
+
+test('_handleFollowerSongChange drains the parked filename into a rebuild once one finishes', async () => {
+    const mod = freshPlugin();
+    const playSongCalls = [];
+    global.window.playSong = async (f) => { playSongCalls.push(f); };
+    // The harness rebuild fails fast (no `highway` global) and the plugin
+    // logs-and-continues — silence the expected noise so the run stays clean.
+    const origError = console.error;
+    console.error = noop;
+    try {
+        mod._setCurrentFilenameForTest('current.sloppak');
+        mod._setFollowerRebuildBusyForTest(true);
+        await mod._handleFollowerSongChange('latest.sloppak');
+        assert.equal(mod._getFollowerPendingFilenameForTest(), 'latest.sloppak',
+            'the later change must be parked while the rebuild is in flight');
+
+        // A fresh change runs a full rebuild once the in-flight one finishes;
+        // its finally must consume the parked filename and re-invoke it
+        // instead of dropping it.
+        mod._setFollowerRebuildBusyForTest(false);
+        await mod._handleFollowerSongChange('first.sloppak');
+        await new Promise((r) => setImmediate(r)); // let the fire-and-forget recursion finish
+        assert.equal(mod._getFollowerPendingFilenameForTest(), null,
+            'the drain must consume the parked filename');
+        assert.ok(playSongCalls.includes('latest.sloppak'),
+            'the parked filename must be re-invoked, not dropped');
+        assert.ok(playSongCalls.includes('first.sloppak'),
+            'the driving rebuild must also run');
+    } finally {
+        delete global.window.playSong;
+        console.error = origError;
+    }
+});
+
+test('the drain skips re-invoking a parked filename that is already the current song', async () => {
+    const mod = freshPlugin();
+    const playSongCalls = [];
+    global.window.playSong = async (f) => { playSongCalls.push(f); };
+    const origError = console.error;
+    console.error = noop;
+    try {
+        mod._setCurrentFilenameForTest('latest.sloppak');
+        mod._setFollowerRebuildBusyForTest(true);
+        await mod._handleFollowerSongChange('latest.sloppak');
+        assert.equal(mod._getFollowerPendingFilenameForTest(), 'latest.sloppak',
+            'the later change must be parked while the rebuild is in flight');
+
+        mod._setFollowerRebuildBusyForTest(false);
+        await mod._handleFollowerSongChange('first.sloppak');
+        assert.equal(mod._getFollowerPendingFilenameForTest(), null,
+            'the drain must still consume the parked filename');
+        assert.ok(playSongCalls.includes('first.sloppak'),
+            'the driving rebuild must run');
+        assert.ok(!playSongCalls.includes('latest.sloppak'),
+            'a parked filename equal to the current song must not trigger a redundant rebuild');
+    } finally {
+        delete global.window.playSong;
+        console.error = origError;
+    }
+});
+
+test('follower interpolation derives the observed playback rate and stops at the extrapolation cap', () => {
+    const oldRaf = global.requestAnimationFrame;
+    const oldCancelRaf = global.cancelAnimationFrame;
+    const oldPerformance = global.performance;
+    let now = 1000;
+    let tick = null;
+    let nextFrame = 0;
+    global.requestAnimationFrame = (cb) => { tick = cb; return ++nextFrame; };
+    global.cancelAnimationFrame = noop;
+    global.performance = { now: () => now };
+    try {
+        const mod = freshPlugin();
+        const seen = [];
+        mod._setPanelsForTest([makeFollowerPanel({ hw: { setTime: (t) => seen.push(t) } })]);
+        mod._onFollowerTimeMessage(4, true);
+        now = 1250;
+        mod._onFollowerTimeMessage(4.5, true); // 0.5 s media / 0.25 s wall = 2x
+        mod._startFollowerInterp();
+        now = 1500;
+        tick();
+        assert.equal(mod._getFollowerCurrentTimeForTest(), 5,
+            'the rAF estimate must use the observed 2x rate between broadcasts');
+        assert.equal(seen.at(-1), 5);
+
+        now = 3600; // 2.35 s since the last anchor: beyond the 2 s safety cap
+        tick();
+        assert.equal(mod._getFollowerPlayingForTest(), false,
+            'the follower must stop extrapolating after the safety cap');
+        assert.equal(mod._getFollowerCurrentTimeForTest(), 5,
+            'the capped frame must not advance the playhead further');
+        mod._stopFollowerInterp();
+    } finally {
+        global.requestAnimationFrame = oldRaf;
+        global.cancelAnimationFrame = oldCancelRaf;
+        global.performance = oldPerformance;
+    }
+});
+
+test('the main BroadcastChannel listener defers docked messages and drops closed popups', () => {
+    const oldBroadcastChannel = global.BroadcastChannel;
+    let channel = null;
+    global.BroadcastChannel = class {
+        constructor() { channel = this; }
+    };
+    try {
+        const mod = freshPlugin();
+        mod._setPopupsForTest([['docked', { popup: {} }], ['closed', { popup: {} }]]);
+        mod._setStartingForTest(true);
+        mod._ensureMainBroadcasterAndListener();
+        channel.onmessage({ data: { type: 'docked', popupId: 'docked', finalState: { arrName: 'Bass' } } });
+        channel.onmessage({ data: { type: 'closed', popupId: 'closed' } });
+        assert.deepEqual(mod._getPendingRedocksForTest(), [{ popupId: 'docked', finalState: { arrName: 'Bass' }, finalStates: null }]);
+        assert.equal(mod._getPopupsForTest().has('docked'), true,
+            'a queued redock keeps its popup entry until the start finishes');
+        assert.equal(mod._getPopupsForTest().has('closed'), false,
+            'a plain closed message releases its popup entry immediately');
+    } finally {
+        global.BroadcastChannel = oldBroadcastChannel;
+    }
+});
+
+test('a closed message for a popup with a queued redock keeps its entry', () => {
+    const oldBroadcastChannel = global.BroadcastChannel;
+    let channel = null;
+    global.BroadcastChannel = class {
+        constructor() { channel = this; }
+    };
+    try {
+        const mod = freshPlugin();
+        mod._setPopupsForTest([['docked', { popup: {} }]]);
+        mod._setStartingForTest(true);
+        mod._ensureMainBroadcasterAndListener();
+        // `docked` while a start is in flight defers the redock; an old popup
+        // build then also posts `closed` for the same popupId. The
+        // belt-and-suspenders guard must not drop the entry the deferred
+        // redock needs.
+        channel.onmessage({ data: { type: 'docked', popupId: 'docked', finalState: { arrName: 'Bass' } } });
+        channel.onmessage({ data: { type: 'closed', popupId: 'docked' } });
+        assert.equal(mod._getPendingRedocksForTest().length, 1,
+            'the docked message must still be queued for the deferred redock');
+        assert.equal(mod._getPopupsForTest().has('docked'), true,
+            'a closed after a queued redock must not drop the entry the deferred redock needs');
+    } finally {
+        global.BroadcastChannel = oldBroadcastChannel;
+    }
+});
+
 // ── _redockPanel deferral while a start is in flight ────────────────────────
 
 test('_redockPanel defers into _pendingRedocks when a start is in flight', () => {
@@ -1388,6 +1543,8 @@ function makeVizElementStub(tag) {
         innerHTML: '',
         dataset: {},
         closest: () => null,
+        remove: noop,
+        replaceWith: noop,
         children: [],
     };
     return el;
@@ -2199,6 +2356,145 @@ test('recreatePanelHighway always turns off the highway-native lyrics flag (the 
         delete global.createHighway;
     }
 });
+
+// The remaining #53 coverage deliberately drives the public UI handlers via
+// the Node host.  The stubs below record lifecycle calls without attempting
+// to emulate a browser canvas or a real WebSocket.
+function makeModeCanvas() {
+    let replacement = null;
+    return {
+        style: { cssText: 'width:100%;height:100%;display:block;', display: '' },
+        replaceWith(next) { replacement = next; },
+        _replacement: () => replacement,
+    };
+}
+
+function makeModePanel(hw) {
+    const button = () => ({ style: {}, onclick: null, disabled: false });
+    const panelDiv = makeVizElementStub('div');
+    panelDiv.getBoundingClientRect = () => ({ width: 100, height: 100 });
+    return {
+        hw,
+        canvas: makeModeCanvas(),
+        panelDiv,
+        bar: { style: { display: '' }, offsetHeight: 28 },
+        select: makeVizElementStub('select'),
+        arrName: { textContent: '' },
+        invertBtn: button(), leftyBtn: button(), lyricsBtn: button(), chordsBtn: button(),
+        detectBtn: button(), channelBtn: button(),
+        masteryHeading: { style: {} }, masterySlider: Object.assign(button(), { value: '100' }),
+        masteryLabel: { style: {}, textContent: '' },
+        popOutBtn: button(), vizSettingsBtn: button(), vizPopover: makeVizElementStub('div'),
+        updateInvertStyle: noop, updateLeftyStyle: noop, updateLyricsStyle: noop, updateChordsStyle: noop,
+    };
+}
+
+function withModeRuntime(fn) {
+    const vizFactoryNames = ['feedBackViz_webgl', 'feedBackViz_twod'];
+    const saved = {
+        WebSocket: global.WebSocket,
+        requestAnimationFrame: global.requestAnimationFrame,
+        cancelAnimationFrame: global.cancelAnimationFrame,
+        createHighway: global.createHighway,
+        vizFactories: vizFactoryNames.map((name) => ({
+            name,
+            present: Object.prototype.hasOwnProperty.call(window, name),
+            value: window[name],
+        })),
+    };
+    global.WebSocket = class { close() {} };
+    global.requestAnimationFrame = () => 1;
+    global.cancelAnimationFrame = noop;
+    try { fn(); }
+    finally {
+        global.WebSocket = saved.WebSocket;
+        global.requestAnimationFrame = saved.requestAnimationFrame;
+        global.cancelAnimationFrame = saved.cancelAnimationFrame;
+        global.createHighway = saved.createHighway;
+        for (const factory of saved.vizFactories) {
+            if (factory.present) window[factory.name] = factory.value;
+            else delete window[factory.name];
+        }
+    }
+}
+
+test('withModeRuntime restores overridden viz factories and removes factories that were absent', () => {
+    freshVizPlugin();
+    const originalWebgl = () => ({ original: true });
+    window.feedBackViz_webgl = originalWebgl;
+    delete window.feedBackViz_twod;
+
+    withModeRuntime(() => {
+        window.feedBackViz_webgl = () => ({ replacement: true });
+        window.feedBackViz_twod = () => ({ temporary: true });
+    });
+
+    assert.equal(window.feedBackViz_webgl, originalWebgl);
+    assert.equal(Object.prototype.hasOwnProperty.call(window, 'feedBackViz_twod'), false);
+});
+
+test('lyrics and viz modes are mutually exclusive across a single panel', () => withModeRuntime(() => {
+    const mod = freshVizPlugin();
+    mod._setCurrentFilenameForTest('song.sloppak');
+    mod._setArrangementsForTest([{ name: 'Lead' }]);
+    const oldHw = makeFakeHighway({ connect: noop });
+    const panel = makeModePanel(oldHw);
+    const initialCanvas = panel.canvas;
+    mod._setPanelsForTest([panel]);
+
+    mod.enterLyricsMode(panel);
+    assert.equal(panel.lyricsMode, true);
+    assert.equal(panel.canvas.style.display, 'none');
+    assert.equal(oldHw._stopped, true, 'lyrics mode stops the normal highway');
+
+    const replacement = makeFakeHighway({ connect: noop });
+    global.createHighway = () => replacement;
+    window.feedBackViz_webgl = () => ({ kind: 'webgl' });
+    mod.enterVizMode(panel, 'webgl');
+    assert.equal(panel.lyricsMode, false, 'entering viz exits the lyrics pane first');
+    assert.equal(panel.vizMode, 'webgl');
+    assert.notEqual(panel.canvas, initialCanvas, 'viz gets a fresh highway canvas after leaving lyrics mode');
+
+    mod.enterLyricsMode(panel);
+    assert.equal(panel.vizMode, null, 'entering lyrics exits the visualization first');
+    assert.equal(panel.lyricsMode, true);
+}));
+
+test('a viz arrangement switch replaces the canvas for each 2D/WebGL context-type swap', () => withModeRuntime(() => {
+    const mod = freshVizPlugin();
+    mod._setCurrentFilenameForTest('song.sloppak');
+    mod._setArrangementsForTest([{ name: 'Lead' }, { name: 'Rhythm' }]);
+    const calls = [];
+    const initial = makeFakeHighway({ connect: noop, setRenderer: (r) => calls.push(['clear', r]) });
+    const panel = makeModePanel(initial);
+    panel.arrIndex = 0;
+    mod._setPanelsForTest([panel]);
+    window.feedBackViz_webgl = () => ({ context: 'webgl' });
+    window.feedBackViz_twod = () => ({ context: '2d' });
+    global.createHighway = () => makeFakeHighway({
+        connect: noop,
+        setRenderer: (r) => calls.push(r ? ['install', r.context] : ['clear', r]),
+    });
+
+    // initPanel owns the real select.onchange branch.  Its node-only export
+    // is the narrow seam needed to exercise that branch deterministically.
+    mod.initPanel(panel, 0, { arrName: '__viz__:webgl:Lead' });
+    const firstCanvas = panel.canvas;
+    panel.select.value = '__viz__:twod:1';
+    panel.select.onchange();
+    const secondCanvas = panel.canvas;
+    panel.select.value = '__viz__:webgl:0';
+    panel.select.onchange();
+
+    assert.notEqual(secondCanvas, firstCanvas, 'WebGL → 2D must discard the context-locked canvas');
+    assert.notEqual(panel.canvas, secondCanvas, '2D → WebGL must discard that replacement canvas too');
+    assert.deepEqual(calls.filter(([kind, renderer]) => kind === 'clear' && renderer === null), [['clear', null], ['clear', null]],
+        'each in-viz arrangement switch clears the outgoing renderer before replacement');
+    assert.deepEqual(calls.filter(([kind]) => kind === 'install').map(([, context]) => context), ['2d', 'webgl'],
+        'each fresh highway pre-installs the requested renderer before init');
+    assert.equal(panel.arrIndex, 0);
+    assert.equal(panel.vizMode, 'webgl');
+}));
 
 // ── Player-context overrides: patch semantics (splitscreen#50) ─────────────
 // window.slopsmithSplitscreen.setPlayerContext(i, patch) must PATCH the
