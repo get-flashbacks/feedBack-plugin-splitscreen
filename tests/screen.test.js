@@ -2708,10 +2708,26 @@ test('rebuildLayout defers via _pendingRebuild when a start is in flight, draine
     try {
         await mod._getVizPluginsReadyForTest();
         const p = mod.startSplitScreen([0, 1]); // not awaited — still "starting"
+        // `active` is also still false at this synchronous point (startSplitScreen
+        // hasn't reached the panel-build loop yet), so a broken guard that drops
+        // its `return` and falls through to the teardown/restart body would be
+        // indistinguishable from a correct deferral by createHighwayCalls alone
+        // (both stay 0, since the fall-through's own `if (wasActive) restart`
+        // check also short-circuits on the same false `active`). teardownPanels()
+        // itself, however, runs unconditionally on that fall-through path and
+        // bumps _ssRealStopGen — so that counter is the one signal that actually
+        // distinguishes "returned early" from "fell through and happened to no-op
+        // downstream". Confirmed by mutation: dropping only the `return` (keeping
+        // the `_pendingRebuild = true` assignment) left the createHighwayCalls-only
+        // version of this assertion green.
+        const stopGenBeforeRebuild = mod._getSsRealStopGenForTest();
         mod.rebuildLayout();
         assert.equal(mod._getPendingRebuildForTest(), true,
             'a rebuild requested mid-start must be recorded as pending, not run immediately');
         assert.equal(createHighwayCalls, 0, 'deferring must not tear down/rebuild before the in-flight start finishes');
+        assert.equal(mod._getSsRealStopGenForTest(), stopGenBeforeRebuild,
+            'the _starting guard must return before reaching teardownPanels() at all — falling through to it ' +
+            'and merely no-op-ing downstream is not the same as deferring');
 
         await p;
         await new Promise((r) => setTimeout(r, 50)); // let the drained rebuild's fire-and-forget startSplitScreen settle

@@ -5867,8 +5867,8 @@ try {
             _getRemoteWaitingShownForTest() { return _remoteWaitingShown; },
             _getFollowerObservedRateForTest() { return _followerObservedRate; },
             _getFollowerRebuildBusyForTest() { return _followerRebuildBusy; },
-            _getFollowerInterpRafForTest() { return _followerInterpRaf; },
             _getPendingRebuildForTest() { return _pendingRebuild; },
+            _getSsRealStopGenForTest() { return _ssRealStopGen; },
         };
     }
 })();
