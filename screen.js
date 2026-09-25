@@ -571,6 +571,7 @@ try {
             detectChannel: 'mono',
             detectDeviceName: '',
             detectVerifierOffsetMs: 0,
+            vizId:        cfg.vizId || '',
         };
     }
 
@@ -618,6 +619,7 @@ try {
                 detectChannel: params.get('detectChannel') || 'mono',
                 detectDeviceName: params.get('detectDeviceName') || '',
                 detectVerifierOffsetMs: parseFloat(params.get('detectVerifierOffsetMs')) || 0,
+                vizId:   params.get('vizId') || '',
             };
             if (!cfg.filename) return null;
             return cfg;
@@ -826,8 +828,27 @@ try {
             ?.find(p => p.id === pluginId)?.settings);
     }
 
-    function _vizSettingKey(pluginId, panelIdx, key) {
-        return 'splitscreenVizSetting:' + encodeURIComponent(pluginId) + ':' + panelIdx + ':' + encodeURIComponent(key);
+    /**
+     * Stable storage identity for a panel's declared-control overrides, minted
+     * on the panel's first read/write. The panel's array position is NOT usable
+     * here: pop-out compacts the survivors (slot 1 becomes slot 0) and a popup
+     * builds its own slot 0, while localStorage is shared between the windows —
+     * so an index-keyed value follows the slot and can be read or overwritten by
+     * an unrelated panel. A random id is used rather than a per-window counter
+     * for the same reason: main's first panel and a popup's first panel would
+     * both draw from their own `1`. Carried through panel prefs
+     * (panelToPrefs → initPanel) and follower config (_captureFollowerConfig),
+     * so it survives layout rebuilds, pop-out/dock and a follower's own
+     * re-split. Numeric-slot keys from the pre-release scheme are deliberately
+     * not migrated — that mapping is exactly the ambiguity being removed.
+     */
+    function _vizId(panel) {
+        if (!panel.vizId) panel.vizId = _randomId('vp-');
+        return panel.vizId;
+    }
+
+    function _vizSettingKey(pluginId, vizId, key) {
+        return 'splitscreenVizSetting:' + encodeURIComponent(pluginId) + ':' + encodeURIComponent(vizId) + ':' + encodeURIComponent(key);
     }
 
     function _coerceVizSetting(value, ctl) {
@@ -851,6 +872,30 @@ try {
             }
         }
     }
+
+    /**
+     * Reconcile live viz panels against a fresh provider snapshot.
+     *
+     * Core loads plugin scripts before `loadLibraryProviders()` publishes
+     * visualization providers, so a panel that initialized in that window saw an
+     * empty snapshot: no declared controls meant no restore AND no Viz ⚙ button,
+     * and neither recovers on its own. Re-run the init-time sequence (restore the
+     * panel's saved values, then reveal + build its popover) for every viz panel
+     * whose plugin has since declared controls.
+     */
+    function _reconcileVizProviders() {
+        for (const panel of panels) {
+            if (!panel.vizMode || !_hasDeclaredVizControls(panel.vizMode)) continue;
+            _restoreVizSettings(panel);
+            _showVizControls(panel, panel.vizMode);
+        }
+    }
+    // The returned unsubscribe is intentionally dropped: the subscription lives as
+    // long as this IIFE, matching the other load-time hooks below. Guarded because
+    // the capability bus only exists on a core new enough to publish providers.
+    try {
+        window.feedBack?.capabilities?.subscribe?.('visualization:providers-refreshed', _reconcileVizProviders);
+    } catch (_) { /* older core — declared controls are simply never discovered */ }
 
     // ── Settings sync ──
     const layoutSelect = document.getElementById('splitscreen-default-layout');
@@ -919,6 +964,9 @@ try {
             mastery: p.hw.getMastery(),
             name: p.name || '',
             playerId: p.playerId || null,
+            // Stable storage identity for this panel's declared-control
+            // overrides. Null until something reads or writes one — see _vizId.
+            vizId: p.vizId || null,
         };
     }
     /**
@@ -1844,8 +1892,14 @@ try {
 
     /**
      * ── Per-panel viz controls ("Viz ⚙" popover) ──
-     * Per-panel values live in the viz plugin's own per-panel localStorage keys
-     * (highway_3d: h3d_bg_panel<N>_<key>, fallback global h3d_bg_<key>) — NOT in
+     * Two storage schemes, picked by whether the viz plugin declares capability
+     * settings. Declared controls are scoped to the renderer INSTANCE, so their
+     * overrides live under splitscreen's own `splitscreenVizSetting:<plugin>:
+     * <vizId>:<key>` keys and are applied through the instance's
+     * applySetting/getSetting — see _vizId for why the identity is a stable id
+     * and not the panel's array position. The legacy highway_3d path instead
+     * lives in the viz plugin's own per-panel localStorage keys
+     * (h3d_bg_panel<N>_<key>, fallback global h3d_bg_<key>) — NOT in
      * splitscreenPanelPrefs. Writing the per-panel key is enough for the 3D
      * renderer (it re-reads all settings each frame); for instant-rebuild
      * settings (palette) we also re-fire the plugin's global setter with its
@@ -1854,7 +1908,8 @@ try {
     function _vizPanelGet(pluginId, panelIdx, ctl) {
         if (_hasDeclaredVizControls(pluginId)) {
             const panel = panels[panelIdx];
-            const key = _vizSettingKey(pluginId, panelIdx, ctl.key);
+            if (!panel) return ctl.default;
+            const key = _vizSettingKey(pluginId, _vizId(panel), ctl.key);
             let saved = null;
             try { saved = localStorage.getItem(key); } catch (_) {}
             if (saved != null) return _coerceVizSetting(saved, ctl);
@@ -1892,7 +1947,7 @@ try {
                 console.error('[splitscreen] viz setting failed:', e);
                 return;
             }
-            try { localStorage.setItem(_vizSettingKey(pluginId, panelIdx, ctl.key), String(next)); } catch (_) {}
+            try { localStorage.setItem(_vizSettingKey(pluginId, _vizId(panel), ctl.key), String(next)); } catch (_) {}
             return;
         }
         try { localStorage.setItem('h3d_bg_panel' + panelIdx + '_' + ctl.key, String(value)); } catch (_) {}
@@ -2337,6 +2392,11 @@ try {
         panel.chordsOverlayOn = false;
         panel.vizMode = null;
         panel.vizRenderer = null;
+        // Adopt the saved storage identity for this panel's declared-control
+        // overrides (main rebuild, pop-out redock and follower re-split all
+        // route through here). Absent in prefs = a genuinely new panel, which
+        // mints its own id on first use.
+        if (prefs?.vizId) panel.vizId = prefs.vizId;
 
         // For viz restore: install the renderer BEFORE hw.init so the canvas
         // context is locked to the correct type (2D vs WebGL) on first init.
@@ -3042,18 +3102,28 @@ try {
             // redock. deviceKey is re-resolved on rebind, so name + offset suffice.
             detectDeviceName:       panel.detectDeviceName || '',
             detectVerifierOffsetMs: panel.detectVerifierOffsetMs || 0,
+            // Keep the panel's declared-control storage identity across a
+            // pop-out / dock round-trip and a follower's own re-split, so its
+            // per-panel viz overrides stay attached to this panel rather than
+            // to whatever slot it lands in.
+            vizId: panel.vizId || '',
         };
+    }
+
+    /**
+     * Opaque random id. `prefix` is cosmetic (it only makes a localStorage key
+     * or a logged popupId readable); uniqueness is what callers rely on.
+     */
+    function _randomId(prefix) {
+        try { return prefix + crypto.randomUUID(); }
+        catch (_) { return prefix + Math.random().toString(36).slice(2) + '-' + Date.now().toString(36); }
     }
 
     /**
      * New Popup Id.
      */
     function _newPopupId() {
-        try {
-            return crypto.randomUUID();
-        } catch (_) {
-            return 'p-' + Math.random().toString(36).slice(2) + '-' + Date.now().toString(36);
-        }
+        return _randomId('p-');
     }
 
     // Small non-blocking notice in the main window (replaces blocking alert()
@@ -3136,6 +3206,7 @@ try {
         sp.set('detectDeviceName', cfg.detectDeviceName || '');
         sp.set('detectVerifierOffsetMs', String(cfg.detectVerifierOffsetMs || 0));
         if (Number.isFinite(cfg.mastery)) sp.set('mastery', String(cfg.mastery));
+        if (cfg.vizId) sp.set('vizId', cfg.vizId);
 
         const popup = window.open(url.toString(), popupId, 'popup,width=1280,height=420');
         if (!popup) {
@@ -5255,6 +5326,7 @@ try {
             detectVerifierOffsetMs: Number.isFinite(cfg.detectVerifierOffsetMs) ? cfg.detectVerifierOffsetMs : 0,
             barHidden: !!cfg.barHidden,
             mastery: Number.isFinite(cfg.mastery) ? cfg.mastery : 1,
+            vizId: cfg.vizId || null,
         };
     }
 
@@ -5863,6 +5935,7 @@ try {
             getWsUrl, resolveArrIndex, getDefaultArrangements,
             panelToPrefs, migratePanelPrefs, _ctlRange,
             _vizPanelGet, _vizPanelSet, _restoreVizSettings, getPanelControlsFor, buildVizPopover,
+            _reconcileVizProviders,
             getSyncUrl, generateRoomKey, normalizeRoomKey, ensureRoomKey,
             buildShareUrl, makeRemoteFollowerCfg, ROOM_KEY_ALPHABET,
             LAN_TIME_MIN_INTERVAL_MS,

@@ -1621,11 +1621,82 @@ test('capability settings restore into a replacement renderer for the same panel
     mod._setPanelsForTest([first]);
     mod._vizPanelSet('piano', 0, ctl, 'left');
     const restored = [];
-    mod._setPanelsForTest([{ vizMode: 'piano', vizRenderer: {
+    // The replacement renderer is a new panel object, but it adopts the saved
+    // identity (prefs.vizId) — that's what carries the values across.
+    const replacement = { vizMode: 'piano', vizId: first.vizId, vizRenderer: {
         applySetting: (key, value) => restored.push([key, value]),
-    } }]);
-    mod._restoreVizSettings(mod._getPanelsForTest()[0]);
+    } };
+    mod._setPanelsForTest([replacement]);
+    mod._restoreVizSettings(replacement);
     assert.deepEqual(restored, [['handFilter', 'left']]);
+});
+
+test('a panel keeps its own viz overrides when a preceding panel is removed', () => {
+    const mod = freshPlugin();
+    const ctl = { key: 'handFilter', type: 'select', default: 'both' };
+    window.feedBack = { vizDomain: { snapshot: () => ({ providers: [{ id: 'piano', settings: [ctl] }] }) } };
+    const survivor = { vizMode: 'piano', vizRenderer: { applySetting: noop } };
+    mod._setPanelsForTest([{ vizMode: 'piano', vizRenderer: { applySetting: noop } }, survivor]);
+    mod._vizPanelSet('piano', 1, ctl, 'left');
+    // Pop-out / rebuild compacts the array — the survivor moves from slot 1 to 0.
+    mod._setPanelsForTest([survivor]);
+    assert.equal(mod._vizPanelGet('piano', 0, ctl), 'left');
+    const restored = [];
+    survivor.vizRenderer = { applySetting: (key, value) => restored.push([key, value]) };
+    mod._restoreVizSettings(survivor);
+    assert.deepEqual(restored, [['handFilter', 'left']]);
+    mod._vizPanelSet('piano', 0, ctl, 'right');
+    assert.equal(mod._vizPanelGet('piano', 0, ctl), 'right');
+});
+
+test('a provider refresh restores and reveals controls on a panel built before providers existed', () => {
+    const mod = freshVizPlugin();
+    const ctl = { key: 'handFilter', label: 'Hands', type: 'select', default: 'both',
+        options: [{ id: 'both', label: 'Both' }, { id: 'left', label: 'LH' }] };
+    // Previous session: providers published, the user picked a value.
+    let providers = [{ id: 'piano', settings: [ctl] }];
+    window.feedBack = { vizDomain: { snapshot: () => ({ providers }) } };
+    const previous = { vizMode: 'piano', vizRenderer: { applySetting: noop } };
+    mod._setPanelsForTest([previous]);
+    mod._vizPanelSet('piano', 0, ctl, 'left');
+    const savedVizId = previous.vizId;
+    assert.ok(savedVizId, 'writing a declared control mints a stable panel identity');
+
+    // New session: core loads plugin scripts before it publishes providers, so
+    // the panel initializes against an empty snapshot and adopts its saved id.
+    providers = [];
+    const restored = [];
+    const panel = {
+        vizMode: 'piano',
+        vizId: savedVizId,
+        vizSettingsBtn: { style: {} },
+        vizPopover: makeVizElementStub('div'),
+        vizRenderer: { applySetting: (key, value) => restored.push([key, value]) },
+    };
+    mod._setPanelsForTest([panel]);
+    mod._showVizControls(panel, 'piano');
+    mod._restoreVizSettings(panel);
+    assert.equal(panel.vizSettingsBtn.style.display, 'none');
+    assert.deepEqual(restored, []);
+
+    // The refresh lands after panel init — the panel must catch up on its own.
+    providers = [{ id: 'piano', settings: [ctl] }];
+    mod._reconcileVizProviders();
+    assert.equal(panel.vizSettingsBtn.style.display, '');
+    assert.ok(panel.vizPopover.children.length > 0, 'popover must be built on refresh');
+    assert.deepEqual(restored, [['handFilter', 'left']]);
+});
+
+test('_reconcileVizProviders leaves non-viz panels and plugins without declarations alone', () => {
+    const mod = freshVizPlugin();
+    window.feedBack = { vizDomain: { snapshot: () => ({ providers: [{ id: 'piano' }] }) } };
+    const btn = { style: {} };
+    const plain = { vizSettingsBtn: btn };
+    const undeclared = { vizMode: 'piano', vizSettingsBtn: { style: {} }, vizPopover: makeVizElementStub('div') };
+    mod._setPanelsForTest([plain, undeclared]);
+    assert.doesNotThrow(() => mod._reconcileVizProviders());
+    assert.equal(btn.style.display, undefined);
+    assert.equal(undeclared.vizSettingsBtn.style.display, undefined);
 });
 
 // ── _vizPanelGet ─────────────────────────────────────────────────────────────
