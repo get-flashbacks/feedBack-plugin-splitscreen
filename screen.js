@@ -807,18 +807,49 @@ try {
      * @param {*} pluginId
      */
     function getPanelControlsFor(pluginId) {
-        // v1: only highway_3d is wired — _vizPanelGet/_vizPanelSet use its
-        // localStorage scheme (h3d_bg_panel<N>_<key>) and its window.h3dBgSet*
-        // setters. The popover stays hidden for other viz plugins until the
-        // descriptor carries per-plugin storage/setter info (or read/write fns).
-        // A plugin can still customize *which* controls show via
-        // window.feedBackViz_highway_3d.panelControls.
+        const providers = window.feedBack?.vizDomain?.snapshot?.().providers;
+        const declared = providers?.find(p => p.id === pluginId)?.settings;
+        if (Array.isArray(declared)) return declared;
+        // Older highway_3d builds publish controls on the factory and read
+        // panel-specific localStorage keys. Preserve that path until the plugin
+        // declares capability settings and implements applySetting().
         if (pluginId !== 'highway_3d') return null;
         const fac = vizFactory(pluginId);
         // An array (even empty) is an intentional override — empty = opt out of
         // per-panel controls. _showVizControls hides the button on an empty list.
         if (fac && Array.isArray(fac.panelControls)) return fac.panelControls;
         return VIZ_PANEL_CONTROLS[pluginId] || null;
+    }
+
+    function _hasDeclaredVizControls(pluginId) {
+        return Array.isArray(window.feedBack?.vizDomain?.snapshot?.().providers
+            ?.find(p => p.id === pluginId)?.settings);
+    }
+
+    function _vizSettingKey(pluginId, panelIdx, key) {
+        return 'splitscreenVizSetting:' + encodeURIComponent(pluginId) + ':' + panelIdx + ':' + encodeURIComponent(key);
+    }
+
+    function _coerceVizSetting(value, ctl) {
+        if (ctl.type === 'toggle') return value === true || value === 'true' || value === '1';
+        if (ctl.type === 'range') {
+            const n = Number(value);
+            const { lo, hi } = _ctlRange(ctl);
+            return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : ctl.default;
+        }
+        return String(value);
+    }
+
+    function _restoreVizSettings(panel) {
+        if (typeof panel.vizRenderer?.applySetting !== 'function' || !_hasDeclaredVizControls(panel.vizMode)) return;
+        const idx = panels.indexOf(panel);
+        if (idx < 0) return;
+        for (const ctl of getPanelControlsFor(panel.vizMode)) {
+            const value = _vizPanelGet(panel.vizMode, idx, ctl);
+            try { panel.vizRenderer.applySetting(ctl.key, value); } catch (e) {
+                console.error('[splitscreen] viz setting restore failed:', e);
+            }
+        }
     }
 
     // ── Settings sync ──
@@ -1521,7 +1552,7 @@ try {
         // a viz plugin that declares panel controls (see getPanelControlsFor).
         // Opens vizPopover (below); the controls inside are generated from the
         // descriptor, so new per-panel options need no change here.
-        const vizSettingsBtn = makeToggleBtn('3D ⚙');
+        const vizSettingsBtn = makeToggleBtn('Viz ⚙');
         vizSettingsBtn.title = 'Per-panel viz settings';
         vizSettingsBtn.style.display = 'none';
         vizSettingsBtn.setAttribute('data-ss-viz-btn', '');
@@ -1769,6 +1800,7 @@ try {
         // Same restore-on-load technique used by initPanel for saved viz prefs.
         if (opts?.preInstallRenderer) {
             hw.setRenderer(opts.preInstallRenderer);
+            panel.vizRenderer = opts.preInstallRenderer;
         }
         hw.init(panel.canvas);
         hw.setInverted(inverted);
@@ -1820,6 +1852,15 @@ try {
      * existing value so _bgEmitChange runs. No global state changes hands.
      */
     function _vizPanelGet(pluginId, panelIdx, ctl) {
+        if (_hasDeclaredVizControls(pluginId)) {
+            const panel = panels[panelIdx];
+            const key = _vizSettingKey(pluginId, panelIdx, ctl.key);
+            let saved = null;
+            try { saved = localStorage.getItem(key); } catch (_) {}
+            if (saved != null) return _coerceVizSetting(saved, ctl);
+            const current = panel?.vizRenderer?.getSetting?.(ctl.key);
+            return current === undefined ? ctl.default : current;
+        }
         let v = null;
         try {
             v = localStorage.getItem('h3d_bg_panel' + panelIdx + '_' + ctl.key);
@@ -1843,6 +1884,17 @@ try {
      * @param {*} value
      */
     function _vizPanelSet(pluginId, panelIdx, ctl, value) {
+        if (_hasDeclaredVizControls(pluginId)) {
+            const panel = panels[panelIdx];
+            if (!panel || panel.vizMode !== pluginId || typeof panel.vizRenderer?.applySetting !== 'function') return;
+            const next = _coerceVizSetting(value, ctl);
+            try { panel.vizRenderer.applySetting(ctl.key, next); } catch (e) {
+                console.error('[splitscreen] viz setting failed:', e);
+                return;
+            }
+            try { localStorage.setItem(_vizSettingKey(pluginId, panelIdx, ctl.key), String(next)); } catch (_) {}
+            return;
+        }
         try { localStorage.setItem('h3d_bg_panel' + panelIdx + '_' + ctl.key, String(value)); } catch (_) {}
         // Re-fire the plugin's global setter with the global's *current* value
         // (or the descriptor default if the global was never set) — the global
@@ -2187,6 +2239,7 @@ try {
         hookPanelReady(panel);
         panel.hw.connect(getWsUrl(currentFilename, panel.arrIndex), { onSongInfo: () => {} });
         panel.vizMode = pluginId;
+        _restoreVizSettings(panel);
 
         panel.updateInvertStyle(panel.hw.getInverted());
         panel.invertBtn.onclick = () => {
@@ -2222,6 +2275,7 @@ try {
         // context, event listeners) via its own cleanup path, then recreate
         // the highway to give the fresh 2D renderer a clean canvas.
         panel.hw.setRenderer(null);
+        panel.vizRenderer = null;
         // Assign the new arrangement BEFORE recreatePanelHighway() runs — it
         // publishes the panel's player context (with the current arrIndex)
         // as part of installing the fresh highway, so publishing with the
@@ -2230,6 +2284,7 @@ try {
         panel.arrIndex = arrIndex;
         recreatePanelHighway(panel);
         panel.vizMode = null;
+        panel.vizRenderer = null;
 
         _hideVizControls(panel);
 
@@ -2281,6 +2336,7 @@ try {
         panel.chordsOverlay = null;
         panel.chordsOverlayOn = false;
         panel.vizMode = null;
+        panel.vizRenderer = null;
 
         // For viz restore: install the renderer BEFORE hw.init so the canvas
         // context is locked to the correct type (2D vs WebGL) on first init.
@@ -2296,7 +2352,8 @@ try {
         let vizInstalled = false;
         if (typeof vizFactoryFn === 'function') {
             try {
-                panel.hw.setRenderer(vizFactoryFn());
+                panel.vizRenderer = vizFactoryFn();
+                panel.hw.setRenderer(panel.vizRenderer);
                 vizInstalled = true;
             } catch (e) {
                 console.error('[splitscreen] viz factory threw for', savedVizPluginId, '— falling back to 2D for panel:', e);
@@ -2393,10 +2450,12 @@ try {
                     // — the fresh canvas locks to the new context type, and
                     // the orphaned old WS can't leak notes into the new chart.
                     panel.hw.setRenderer(null);
+                    panel.vizRenderer = null;
                     recreatePanelHighway(panel, { preInstallRenderer: newRenderer });
                     hookPanelReady(panel);
                     panel.hw.connect(getWsUrl(currentFilename, vizIdx), { onSongInfo: () => {} });
                     panel.vizMode = pluginId;
+                    _restoreVizSettings(panel);
                     const vp = vizPlugins.find(p => p.id === pluginId);
                     panel.arrName.textContent = (arrangements[vizIdx]?.name || '') + ' (' + (vp?.name || pluginId) + ')';
                     // Re-bind invert handler on the fresh hw
@@ -2912,6 +2971,7 @@ try {
             if (p.vizMode) {
                 p.hw.setRenderer(null);
                 p.vizMode = null;
+                p.vizRenderer = null;
             }
             p.hw.stop();
         }
@@ -5802,7 +5862,7 @@ try {
         module.exports = {
             getWsUrl, resolveArrIndex, getDefaultArrangements,
             panelToPrefs, migratePanelPrefs, _ctlRange,
-            _vizPanelGet, _vizPanelSet, getPanelControlsFor, buildVizPopover,
+            _vizPanelGet, _vizPanelSet, _restoreVizSettings, getPanelControlsFor, buildVizPopover,
             getSyncUrl, generateRoomKey, normalizeRoomKey, ensureRoomKey,
             buildShareUrl, makeRemoteFollowerCfg, ROOM_KEY_ALPHABET,
             LAN_TIME_MIN_INTERVAL_MS,

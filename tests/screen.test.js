@@ -1574,6 +1574,51 @@ const VIZ_CTL = {
     cameraLockZoom:  { key: 'cameraLockZoom',  label: 'Locked zoom (In ↔ Out)',  type: 'range',  default: 0.5, min: 0, max: 1, step: 0.05 },
 };
 
+test('capability settings expose controls for any visualization and stay scoped to renderer instances', () => {
+    const mod = freshVizPlugin();
+    const controls = [{ key: 'handFilter', label: 'Hands', type: 'select', default: 'both',
+        options: [{ id: 'both', label: 'Both' }, { id: 'left', label: 'LH' }, { id: 'right', label: 'RH' }] }];
+    window.feedBack = { vizDomain: { snapshot: () => ({ providers: [{ id: 'piano', settings: controls }] }) } };
+    const calls = [[], []];
+    const panels = calls.map((list) => ({ vizMode: 'piano', vizRenderer: {
+        applySetting: (key, value) => list.push([key, value]),
+    } }));
+    mod._setPanelsForTest(panels);
+    assert.equal(mod.getPanelControlsFor('piano'), controls);
+    mod._vizPanelSet('piano', 0, controls[0], 'left');
+    mod._vizPanelSet('piano', 1, controls[0], 'right');
+    assert.deepEqual(calls, [[['handFilter', 'left']], [['handFilter', 'right']]]);
+    assert.equal(mod._vizPanelGet('piano', 0, controls[0]), 'left');
+    assert.equal(mod._vizPanelGet('piano', 1, controls[0]), 'right');
+    assert.equal(localStorage.getItem('piano_hand_filter'), null);
+});
+
+test('capability setting changes do not persist when the renderer rejects them', () => {
+    const mod = freshPlugin();
+    const ctl = { key: 'handFilter', type: 'select', default: 'both' };
+    window.feedBack = { vizDomain: { snapshot: () => ({ providers: [{ id: 'piano', settings: [ctl] }] }) } };
+    mod._setPanelsForTest([{ vizMode: 'piano', vizRenderer: { applySetting: () => { throw Error('failed'); } } }]);
+    const oldError = console.error;
+    console.error = noop;
+    try { mod._vizPanelSet('piano', 0, ctl, 'left'); } finally { console.error = oldError; }
+    assert.equal(mod._vizPanelGet('piano', 0, ctl), 'both');
+});
+
+test('capability settings restore into a replacement renderer for the same panel', () => {
+    const mod = freshPlugin();
+    const ctl = { key: 'handFilter', type: 'select', default: 'both' };
+    window.feedBack = { vizDomain: { snapshot: () => ({ providers: [{ id: 'piano', settings: [ctl] }] }) } };
+    const first = { vizMode: 'piano', vizRenderer: { applySetting: noop } };
+    mod._setPanelsForTest([first]);
+    mod._vizPanelSet('piano', 0, ctl, 'left');
+    const restored = [];
+    mod._setPanelsForTest([{ vizMode: 'piano', vizRenderer: {
+        applySetting: (key, value) => restored.push([key, value]),
+    } }]);
+    mod._restoreVizSettings(mod._getPanelsForTest()[0]);
+    assert.deepEqual(restored, [['handFilter', 'left']]);
+});
+
 // ── _vizPanelGet ─────────────────────────────────────────────────────────────
 
 test('_vizPanelGet reads the panel-specific key when present', () => {
