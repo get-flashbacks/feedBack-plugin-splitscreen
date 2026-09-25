@@ -775,7 +775,7 @@ try {
         { id: 'pastel',  label: 'Pastel' },
     ];
 
-    // Per-panel viz controls surfaced in a panel's "3D ⚙" popover. Each entry:
+    // Per-panel viz controls surfaced in a panel's "Viz ⚙" popover. Each entry:
     //   { key, label, type:'toggle'|'range'|'select', default, min?, max?, step?, options? }
     // `key` is the localStorage suffix the viz plugin reads per-panel. For
     // highway_3d that's h3d_bg_panel<N>_<key>, falling back to the global
@@ -807,7 +807,7 @@ try {
      * @param {*} pluginId
      */
     function getPanelControlsFor(pluginId) {
-        const providers = window.feedBack?.vizDomain?.snapshot?.().providers;
+        const providers = window.feedBack?.vizDomain?.snapshot?.()?.providers;
         const declared = providers?.find(p => p.id === pluginId)?.settings;
         if (Array.isArray(declared)) return declared;
         // Older highway_3d builds publish controls on the factory and read
@@ -822,7 +822,7 @@ try {
     }
 
     function _hasDeclaredVizControls(pluginId) {
-        return Array.isArray(window.feedBack?.vizDomain?.snapshot?.().providers
+        return Array.isArray(window.feedBack?.vizDomain?.snapshot?.()?.providers
             ?.find(p => p.id === pluginId)?.settings);
     }
 
@@ -1548,7 +1548,7 @@ try {
         latWrap.appendChild(latDown); latWrap.appendChild(latVal); latWrap.appendChild(latUp);
         bar.appendChild(latWrap);
 
-        // "3D ⚙" — per-panel viz settings. Hidden unless the panel is running
+        // "Viz ⚙" — per-panel viz settings. Hidden unless the panel is running
         // a viz plugin that declares panel controls (see getPanelControlsFor).
         // Opens vizPopover (below); the controls inside are generated from the
         // descriptor, so new per-panel options need no change here.
@@ -1843,7 +1843,7 @@ try {
     }
 
     /**
-     * ── Per-panel viz controls ("3D ⚙" popover) ──
+     * ── Per-panel viz controls ("Viz ⚙" popover) ──
      * Per-panel values live in the viz plugin's own per-panel localStorage keys
      * (highway_3d: h3d_bg_panel<N>_<key>, fallback global h3d_bg_<key>) — NOT in
      * splitscreenPanelPrefs. Writing the per-panel key is enough for the 3D
@@ -2385,7 +2385,7 @@ try {
             savePanelPrefsDebounced();
         };
 
-        // Per-panel viz controls live in the "3D ⚙" popover, which owns its own
+        // Per-panel viz controls live in the "Viz ⚙" popover, which owns its own
         // input handlers (built by buildVizPopover via _showVizControls when the
         // panel enters viz mode). Nothing to wire here.
 

@@ -109,7 +109,7 @@ Each entry in `panels[]` is built with `Object.assign({ hw, arrIndex: 0 }, parts
   detectBtn,         // Detect toggle button
   updateDetectStyle, // fn(bool)
   channelBtn,        // M/L/R channel button
-  vizSettingsBtn,    // "3D ⚙" button — shown only in viz mode when the viz plugin
+  vizSettingsBtn,    // "Viz ⚙" button — shown only in viz mode when the viz plugin
                      //   has panel controls; opens vizPopover
   vizPopover,        // div.ss-viz-popover (child of panelDiv, position:absolute,
                      //   above the bar, z-index:9) — per-panel viz controls, built
@@ -186,14 +186,14 @@ Each panel is always in exactly one of these modes. Flags are mutually exclusive
   order and returns the first hit — current and legacy viz plugins both resolve.
   `hasVizFactory(id)` is the boolean form used for capability checks.
 - `canvas` stays visible (renderer draws to it)
-- A **"3D ⚙"** button (`vizSettingsBtn`) is shown if the viz plugin has per-panel controls (see "Per-panel viz controls" below); it opens `vizPopover` with those controls scoped to this panel. Other viz config still lives in the plugin's global settings UI.
+- A **"Viz ⚙"** button (`vizSettingsBtn`) is shown if the viz plugin has per-panel controls (see "Per-panel viz controls" below); it opens `vizPopover` with those controls scoped to this panel. Other viz config still lives in the plugin's global settings UI.
 - To exit: `recreatePanelHighway(panel)` discards the viz highway and installs a fresh 2D highway; `_hideVizControls(panel)` hides the button/popover
 - **Canvas context-type lock:** the first `getContext('2d')` or `getContext('webgl')` call on a canvas locks it for its lifetime. Swapping renderers mid-session on the same canvas (e.g. 2D → WebGL → 2D) may not work without re-creating the canvas. The restore-on-load path is safe because `initPanel()` calls `panel.hw.setRenderer(factory())` **before** `hw.init(canvas)` when a viz pref is detected — so the canvas is initialised with the correct context type from the start. For mid-session 2D ↔ viz swaps (and viz-to-viz arrangement switches), `recreatePanelHighway(panel)` is called first to discard the previous highway instance before the new renderer takes over.
 - `jumpingtab` and `tabview` (Jumping Tab / Tab View) are ordinary entries on this path (splitscreen#47) — both migrated from a standalone-pane factory (`window.createJumpingTabPane` / `window.createTabView`, each with its own splitscreen-side sentinel and lifecycle functions) to the setRenderer/viz-factory contract, and are now selected and torn down exactly like `highway_3d`/`piano`, with no plugin-specific code left in this file. This is also a real (upstream-forced) UX change for Tab View specifically: it used to be a toggleable *overlay* that coexisted with whatever highway/viz was already showing; as a viz-factory renderer it now *replaces* the panel's renderer like any other viz pick, since tabview no longer exports anything that can overlay a live highway.
 
-## Per-panel viz controls (the "3D ⚙" popover)
+## Per-panel viz controls (the "Viz ⚙" popover)
 
-When a panel is in viz mode, splitscreen shows a `vizSettingsBtn` ("3D ⚙") that opens `vizPopover` — a small popover with controls that override that viz plugin's settings **for this panel only**. The controls are generated from a descriptor, so adding a new per-panel option doesn't require touching the popover code.
+When a panel is in viz mode, splitscreen shows a `vizSettingsBtn` ("Viz ⚙") that opens `vizPopover` — a small popover with controls that override that viz plugin's settings **for this panel only**. The controls are generated from a descriptor, so adding a new per-panel option doesn't require touching the popover code.
 
 - **Descriptor lookup** — `getPanelControlsFor(pluginId)` first reads `settings` from the matching provider in `window.feedBack.vizDomain.snapshot().providers`. Any visualization can declare these in `capabilities.visualization.settings` and implement `applySetting(key, value)` on each renderer instance. Descriptors use `{ key, label, type:'toggle'|'range'|'select', default, min?, max?, step?, options? }`, with `options` as `[{id,label}]`. The old factory `panelControls` and built-in highway_3d descriptor remain as compatibility fallbacks. An empty declared array hides the button.
 - **Storage** — capability settings are scoped to renderer instances. Splitscreen persists them by plugin ID, panel slot, and key under `splitscreenVizSetting:<pluginId>:<N>:<key>` and reapplies them when it creates a replacement renderer. The renderer's optional `getSetting(key)` supplies the initial value when no override is saved. Legacy highway_3d controls continue using `h3d_bg_panel<N>_<key>` and its global setter event to preserve existing preferences.

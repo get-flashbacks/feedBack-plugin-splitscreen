@@ -1593,6 +1593,15 @@ test('capability settings expose controls for any visualization and stay scoped 
     assert.equal(localStorage.getItem('piano_hand_filter'), null);
 });
 
+test('null visualization snapshot leaves controls unavailable without throwing', () => {
+    const mod = freshVizPlugin();
+    window.feedBack = { vizDomain: { snapshot: () => null } };
+    assert.equal(mod.getPanelControlsFor('piano'), null);
+    const panel = { vizMode: 'piano', vizRenderer: { applySetting: () => { throw Error('unexpected'); } } };
+    mod._setPanelsForTest([panel]);
+    assert.doesNotThrow(() => mod._restoreVizSettings(panel));
+});
+
 test('capability setting changes do not persist when the renderer rejects them', () => {
     const mod = freshPlugin();
     const ctl = { key: 'handFilter', type: 'select', default: 'both' };
@@ -2159,7 +2168,7 @@ test('sizeCanvases measures every panel before writing any resize (no interleave
 });
 
 // ── Render-mode / per-panel viz lifecycle (splitscreen#53) ──────────────────
-// _showVizControls/_hideVizControls own the "3D ⚙" button + popover visible
+// _showVizControls/_hideVizControls own the "Viz ⚙" button + popover visible
 // only in viz mode, and recreatePanelHighway discards the old highway
 // instance (stopping it, transferring inverted/lefty/mastery, replacing the
 // canvas element) before installing a fresh one — the mechanism enterVizMode/
