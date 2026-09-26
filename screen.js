@@ -861,12 +861,25 @@ try {
         return String(value);
     }
 
+    /** This panel's saved override for one declared control, coerced to the
+     *  control's type, or undefined when it has never been set. */
+    function _vizSavedSetting(pluginId, panel, ctl) {
+        let saved = null;
+        try { saved = localStorage.getItem(_vizSettingKey(pluginId, _vizId(panel), ctl.key)); } catch (_) { /* storage unavailable */ }
+        return saved == null ? undefined : _coerceVizSetting(saved, ctl);
+    }
+
     function _restoreVizSettings(panel) {
         if (typeof panel.vizRenderer?.applySetting !== 'function' || !_hasDeclaredVizControls(panel.vizMode)) return;
         const idx = panels.indexOf(panel);
         if (idx < 0) return;
         for (const ctl of getPanelControlsFor(panel.vizMode)) {
-            const value = _vizPanelGet(panel.vizMode, idx, ctl);
+            // Only re-apply what this panel actually saved. Applying the
+            // renderer's own getSetting() (or the default) back to it would
+            // pin an override equal to the current value, so the panel would
+            // stop following the plugin's global setting.
+            const value = _vizSavedSetting(panel.vizMode, panel, ctl);
+            if (value === undefined) continue;
             try { panel.vizRenderer.applySetting(ctl.key, value); } catch (e) {
                 console.error('[splitscreen] viz setting restore failed:', e);
             }
@@ -1909,10 +1922,8 @@ try {
         if (_hasDeclaredVizControls(pluginId)) {
             const panel = panels[panelIdx];
             if (!panel) return ctl.default;
-            const key = _vizSettingKey(pluginId, _vizId(panel), ctl.key);
-            let saved = null;
-            try { saved = localStorage.getItem(key); } catch (_) {}
-            if (saved != null) return _coerceVizSetting(saved, ctl);
+            const saved = _vizSavedSetting(pluginId, panel, ctl);
+            if (saved !== undefined) return saved;
             const current = panel?.vizRenderer?.getSetting?.(ctl.key);
             return current === undefined ? ctl.default : current;
         }

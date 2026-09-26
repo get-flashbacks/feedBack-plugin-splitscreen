@@ -1593,6 +1593,39 @@ test('capability settings expose controls for any visualization and stay scoped 
     assert.equal(localStorage.getItem('piano_hand_filter'), null);
 });
 
+test('restore leaves a panel with nothing saved following the renderer global', () => {
+    const mod = freshPlugin();
+    const ctl = { key: 'handFilter', type: 'select', default: 'both' };
+    window.feedBack = { vizDomain: { snapshot: () => ({ providers: [{ id: 'piano', settings: [ctl] }] }) } };
+    const applied = [];
+    const panel = { vizMode: 'piano', vizRenderer: {
+        getSetting: () => 'L',
+        applySetting: (key, value) => applied.push([key, value]),
+    } };
+    mod._setPanelsForTest([panel]);
+    mod._restoreVizSettings(panel);
+    // Re-applying getSetting()'s value would pin an override equal to the
+    // global and stop the panel following later global changes.
+    assert.deepEqual(applied, []);
+    // The popover still shows the renderer's effective value.
+    assert.equal(mod._vizPanelGet('piano', 0, ctl), 'L');
+});
+
+test('restore re-applies saved controls and skips unsaved ones per control', () => {
+    const mod = freshPlugin();
+    const hand = { key: 'handFilter', type: 'select', default: 'both' };
+    const glow = { key: 'glow', type: 'toggle', default: true };
+    window.feedBack = { vizDomain: { snapshot: () => ({ providers: [{ id: 'piano', settings: [hand, glow] }] }) } };
+    const panel = { vizMode: 'piano', vizRenderer: { applySetting: noop, getSetting: () => undefined } };
+    mod._setPanelsForTest([panel]);
+    mod._vizPanelSet('piano', 0, hand, 'L'); // only handFilter is saved
+    const applied = [];
+    panel.vizRenderer = { applySetting: (key, value) => applied.push([key, value]) };
+    mod._restoreVizSettings(panel);
+    // An unsaved sibling control must not suppress the saved one.
+    assert.deepEqual(applied, [['handFilter', 'L']]);
+});
+
 test('null visualization snapshot leaves controls unavailable without throwing', () => {
     const mod = freshVizPlugin();
     window.feedBack = { vizDomain: { snapshot: () => null } };
