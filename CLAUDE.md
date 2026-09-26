@@ -68,6 +68,7 @@ screen.js
 | `splitscreenRoomKey` | Persistent 6-char LAN room key (splitscreen#21) — survives sessions so viewer bookmarks stay valid; rotated only via settings Regenerate |
 | `splitscreenLanShareActive` | `'true'` while a LAN share is live — read on load to auto-resume the share after a crash/reload |
 | `splitscreenLanShareCfg` | JSON of the shared panel's follower config (detect fields stripped) — what `config` replies carry |
+| `splitscreenVizSetting:<pluginId>:<vizId>:<key>` | A panel's override for one declared viz control — see "Per-panel viz controls" |
 
 ### Panel pref object shape (in `splitscreenPanelPrefs`)
 
@@ -80,6 +81,9 @@ screen.js
   detectChannel: string, // 'mono' | 'left' | 'right'
   barHidden: bool,       // whether the panel's mini control bar is hidden
   mastery: number,       // master-difficulty fraction 0..1 (0=easy, 1=full chart)
+  name: string,          // display name (P1, P2, …)
+  playerId: string|null, // stable player identity, restored across rebuild/pop-out
+  vizId: string|null,    // stable identity for this panel's declared-control overrides
 }
 ```
 
@@ -109,7 +113,7 @@ Each entry in `panels[]` is built with `Object.assign({ hw, arrIndex: 0 }, parts
   detectBtn,         // Detect toggle button
   updateDetectStyle, // fn(bool)
   channelBtn,        // M/L/R channel button
-  vizSettingsBtn,    // "3D ⚙" button — shown only in viz mode when the viz plugin
+  vizSettingsBtn,    // "Viz ⚙" button — shown only in viz mode when the viz plugin
                      //   has panel controls; opens vizPopover
   vizPopover,        // div.ss-viz-popover (child of panelDiv, position:absolute,
                      //   above the bar, z-index:9) — per-panel viz controls, built
@@ -121,6 +125,9 @@ Each entry in `panels[]` is built with `Object.assign({ hw, arrIndex: 0 }, parts
   lyricsMode,        // bool — showing lyrics pane
   lyricsPane,        // { el, connect, destroy } | null
   vizMode,           // string|null — plugin id of active viz renderer (e.g. 'highway_3d', 'jumpingtab'), or null
+  vizRenderer,       // object|null — the viz renderer INSTANCE (carries applySetting/getSetting)
+  vizId,             // string|undefined — stable storage identity for this panel's
+                     //   declared-control overrides; minted lazily, carried via prefs/follower cfg
   detectChannel,     // 'mono' | 'left' | 'right'
   detector,          // createNoteDetector instance | null
 }
@@ -186,19 +193,21 @@ Each panel is always in exactly one of these modes. Flags are mutually exclusive
   order and returns the first hit — current and legacy viz plugins both resolve.
   `hasVizFactory(id)` is the boolean form used for capability checks.
 - `canvas` stays visible (renderer draws to it)
-- A **"3D ⚙"** button (`vizSettingsBtn`) is shown if the viz plugin has per-panel controls (see "Per-panel viz controls" below); it opens `vizPopover` with those controls scoped to this panel. Other viz config still lives in the plugin's global settings UI.
+- A **"Viz ⚙"** button (`vizSettingsBtn`) is shown if the viz plugin has per-panel controls (see "Per-panel viz controls" below); it opens `vizPopover` with those controls scoped to this panel. Other viz config still lives in the plugin's global settings UI.
 - To exit: `recreatePanelHighway(panel)` discards the viz highway and installs a fresh 2D highway; `_hideVizControls(panel)` hides the button/popover
 - **Canvas context-type lock:** the first `getContext('2d')` or `getContext('webgl')` call on a canvas locks it for its lifetime. Swapping renderers mid-session on the same canvas (e.g. 2D → WebGL → 2D) may not work without re-creating the canvas. The restore-on-load path is safe because `initPanel()` calls `panel.hw.setRenderer(factory())` **before** `hw.init(canvas)` when a viz pref is detected — so the canvas is initialised with the correct context type from the start. For mid-session 2D ↔ viz swaps (and viz-to-viz arrangement switches), `recreatePanelHighway(panel)` is called first to discard the previous highway instance before the new renderer takes over.
 - `jumpingtab` and `tabview` (Jumping Tab / Tab View) are ordinary entries on this path (splitscreen#47) — both migrated from a standalone-pane factory (`window.createJumpingTabPane` / `window.createTabView`, each with its own splitscreen-side sentinel and lifecycle functions) to the setRenderer/viz-factory contract, and are now selected and torn down exactly like `highway_3d`/`piano`, with no plugin-specific code left in this file. This is also a real (upstream-forced) UX change for Tab View specifically: it used to be a toggleable *overlay* that coexisted with whatever highway/viz was already showing; as a viz-factory renderer it now *replaces* the panel's renderer like any other viz pick, since tabview no longer exports anything that can overlay a live highway.
 
-## Per-panel viz controls (the "3D ⚙" popover)
+## Per-panel viz controls (the "Viz ⚙" popover)
 
-When a panel is in viz mode, splitscreen shows a `vizSettingsBtn` ("3D ⚙") that opens `vizPopover` — a small popover with controls that override that viz plugin's settings **for this panel only**. The controls are generated from a descriptor, so adding a new per-panel option doesn't require touching the popover code.
+When a panel is in viz mode, splitscreen shows a `vizSettingsBtn` ("Viz ⚙") that opens `vizPopover` — a small popover with controls that override that viz plugin's settings **for this panel only**. The controls are generated from a descriptor, so adding a new per-panel option doesn't require touching the popover code.
 
-- **Descriptor lookup** — `getPanelControlsFor(pluginId)` returns `null` for any plugin other than `highway_3d` (v1 — `_vizPanelGet`/`_vizPanelSet` are hard-wired to highway_3d's storage scheme + `window.h3dBgSet*` setters); for `highway_3d` it returns `vizFactory('highway_3d').panelControls` if exposed, else the built-in `VIZ_PANEL_CONTROLS.highway_3d` (`palette`, `cameraSmoothing`, `cameraLockLow`, `cameraLockZoom`). The viz-plugin-published list wins, so the plugin can keep the *list of controls* current without splitscreen edits — generalizing to other plugins later means extending the descriptor with per-plugin storage/setter info (or read/write fns) and dropping the gate. Each descriptor entry: `{ key, label, type:'toggle'|'range'|'select', default, min?, max?, step?, options? }` where `options` for `select` is `[{id,label}]`; for `range`, `min`/`max` default to `0`/`1` and `step` to `0.05` when omitted (`_ctlRange`). A plugin-published **empty array** is a valid override — it opts out of per-panel controls (`_showVizControls` hides the button on an empty list).
-- **Storage** — per-panel values are written to the viz plugin's own per-panel keys, **not** `splitscreenPanelPrefs`. For `highway_3d`: `localStorage['h3d_bg_panel<N>_<key>']` (read by the plugin's `_bgReadSetting`, falling back to the global `h3d_bg_<key>`). `_vizPanelGet` / `_vizPanelSet` implement this; `_vizPanelSet` also re-fires `window.h3dBgSet<Key>(<currentGlobal>)` so the plugin's change event runs (instant rebuild for settings like `palette`; the 3D renderer also re-reads everything per frame, so even without the re-fire the panel key takes effect next frame). On reload, `enterVizMode` → `_showVizControls` → `buildVizPopover` re-reads the keys, so the popover reflects the saved per-panel state. The keys are never cleared on exit — `_hideVizControls` only hides the popover/button — so they persist indefinitely, **namespaced by panel slot** (`panel<N>`) rather than by session or song. They're inert only for a panel that never runs 3D again: if panel N later re-enables 3D viz (next session, next song, months later), it silently inherits whatever overrides were left in that slot. That per-slot persistence mirrors the original `h3d_bg_*` palette behavior and the rest of the panel prefs; to start a slot fresh, delete its `h3d_bg_panel<N>_*` keys from localStorage by hand.
+- **Descriptor lookup** — `getPanelControlsFor(pluginId)` first reads `settings` from the matching provider in `window.feedBack.vizDomain.snapshot().providers`. Any visualization can declare these in `capabilities.visualization.settings` and implement `applySetting(key, value)` on each renderer instance. Descriptors use `{ key, label, type:'toggle'|'range'|'select', default, min?, max?, step?, options? }`, with `options` as `[{id,label}]`. The old factory `panelControls` and built-in highway_3d descriptor remain as compatibility fallbacks. An empty declared array hides the button.
+- **Provider-refresh reconciliation** — core loads plugin scripts *before* `loadLibraryProviders()` publishes providers, so a panel can initialize against an empty snapshot: descriptor lookup finds nothing, so the value is never restored and the button never appears. `_reconcileVizProviders` runs the init-time sequence (restore saved values, then reveal + build the popover) for every live viz panel whose plugin has since declared controls, driven by `window.feedBack.capabilities.subscribe('visualization:providers-refreshed', …)` (the unsub is dropped — the subscription lives as long as the IIFE). Core normalises an empty declared array to absent, so a provider can't use `settings: []` to suppress the legacy fallback.
+- **Storage** — capability settings are scoped to renderer instances. Splitscreen persists them under `splitscreenVizSetting:<pluginId>:<vizId>:<key>` and reapplies them when it creates a replacement renderer. The renderer's optional `getSetting(key)` supplies the initial value when no override is saved. Legacy highway_3d controls continue using `h3d_bg_panel<N>_<key>` and its global setter event to preserve existing preferences.
+- **Panel identity (`vizId`)** — the middle segment is a random id minted lazily on the panel's first declared-control read/write (`_vizId`), **not** the panel's array position: pop-out compacts the survivors and a popup builds its own slot 0, while localStorage is shared between the windows, so an index-keyed value follows the slot and can be read or overwritten by an unrelated panel. A per-window counter doesn't help either (main's first panel and a popup's first panel would both draw from their own `1`). The id is carried through panel prefs (`panelToPrefs` → `initPanel`) and follower config (`_captureFollowerConfig` → pop-out URL / `docked` payload / relay `config`), so it survives layout rebuilds, pop-out/dock and a follower's own re-split; follower sub-panels created beyond the incoming cfgs get their own. Numeric-slot keys from the pre-release scheme are deliberately **not** migrated — that mapping is exactly the ambiguity being removed.
 - **Lifecycle** — `_showVizControls(panel, pluginId)` (builds the popover + shows the button) is called at the end of `enterVizMode` and the in-place viz-switch branch of `panel.select.onchange`. `_hideVizControls(panel)` (hides + empties) is called from `exitVizMode` and `enterLyricsMode`. `togglePanelBar` closes the popover when hiding the bar (it's anchored to the bar height). A document-level capture `pointerdown` listener (`_closeAllVizPopovers`) closes any open popover on a click outside `.ss-viz-popover` / `[data-ss-viz-btn]`. The `vizSettingsBtn` click handler **rebuilds the popover from current localStorage every time it opens** — `_closeAllVizPopovers` / the outside-click handler only hide (don't empty), so the rebuild-on-open is the single point that guarantees the controls reflect any `h3d_bg_*` changes (e.g. via the plugin's own settings UI) made while the popover was closed.
-- **Note for new viz plugins** that want per-panel controls: expose `window.feedBackViz_<id>.panelControls = [...]` and use the `*_panel<N>_*` localStorage convention the plugin already reads (or, if it uses a different scheme, the descriptor would need to carry `read`/`write` fns — not implemented in v1; only `highway_3d` is wired).
+- **Note for new viz plugins** that want per-panel controls: declare `capabilities.visualization.settings` in the manifest and implement `applySetting(key, value)` on each renderer instance. Implement `getSetting(key)` if the popover should show a renderer-provided initial value instead of the descriptor default.
 
 ## `sizeCanvases()` — call it whenever layout space changes
 
