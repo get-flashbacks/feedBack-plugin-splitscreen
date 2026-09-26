@@ -1593,6 +1593,24 @@ test('capability settings expose controls for any visualization and stay scoped 
     assert.equal(localStorage.getItem('piano_hand_filter'), null);
 });
 
+test('restore leaves a panel with nothing saved following the renderer global', () => {
+    const mod = freshPlugin();
+    const ctl = { key: 'handFilter', type: 'select', default: 'both' };
+    window.feedBack = { vizDomain: { snapshot: () => ({ providers: [{ id: 'piano', settings: [ctl] }] }) } };
+    const applied = [];
+    const panel = { vizMode: 'piano', vizRenderer: {
+        getSetting: () => 'L',
+        applySetting: (key, value) => applied.push([key, value]),
+    } };
+    mod._setPanelsForTest([panel]);
+    mod._restoreVizSettings(panel);
+    // Re-applying getSetting()'s value would pin an override equal to the
+    // global and stop the panel following later global changes.
+    assert.deepEqual(applied, []);
+    // The popover still shows the renderer's effective value.
+    assert.equal(mod._vizPanelGet('piano', 0, ctl), 'L');
+});
+
 test('null visualization snapshot leaves controls unavailable without throwing', () => {
     const mod = freshVizPlugin();
     window.feedBack = { vizDomain: { snapshot: () => null } };
