@@ -1611,6 +1611,21 @@ test('restore leaves a panel with nothing saved following the renderer global', 
     assert.equal(mod._vizPanelGet('piano', 0, ctl), 'L');
 });
 
+test('restore re-applies saved controls and skips unsaved ones per control', () => {
+    const mod = freshPlugin();
+    const hand = { key: 'handFilter', type: 'select', default: 'both' };
+    const glow = { key: 'glow', type: 'toggle', default: true };
+    window.feedBack = { vizDomain: { snapshot: () => ({ providers: [{ id: 'piano', settings: [hand, glow] }] }) } };
+    const panel = { vizMode: 'piano', vizRenderer: { applySetting: noop, getSetting: () => undefined } };
+    mod._setPanelsForTest([panel]);
+    mod._vizPanelSet('piano', 0, hand, 'L'); // only handFilter is saved
+    const applied = [];
+    panel.vizRenderer = { applySetting: (key, value) => applied.push([key, value]) };
+    mod._restoreVizSettings(panel);
+    // An unsaved sibling control must not suppress the saved one.
+    assert.deepEqual(applied, [['handFilter', 'L']]);
+});
+
 test('null visualization snapshot leaves controls unavailable without throwing', () => {
     const mod = freshVizPlugin();
     window.feedBack = { vizDomain: { snapshot: () => null } };
