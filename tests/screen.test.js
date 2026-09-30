@@ -1267,6 +1267,27 @@ test('_followerBusHandler share-ended orphans a remote viewer with the terminal 
     assert.equal(mod._getFollowerOrphanedForTest(), true);
 });
 
+// Regression for splitscreen#72 review: _onFollowerOrphaned also calls
+// teardownPanels() directly (same bare-call bug as _handleFollowerSongChange).
+// Orphaning is terminal — this tab will never score anything again — so the
+// singleton must STAY suppressed rather than reopening a mic on a dead viewer.
+test('orphaning a follower (share-ended) never un-suppresses note_detect', () => {
+    const calls = [];
+    global.window = {
+        location: { search: '', host: 'localhost:8420', protocol: 'http:' },
+        addEventListener: noop,
+        createNoteDetector: { setDefaultSuppressed: (v) => calls.push(v) },
+    };
+    global.document = makeFollowerDocumentStub();
+    global.localStorage = makeLocalStorage();
+    global.location = global.window.location;
+    const mod = loadPlugin();
+    mod._setFollowerForTest({ remote: true });
+    mod._followerBusHandler({ type: 'share-ended' });
+    assert.ok(!calls.includes(false),
+        'orphaning a follower must never restore (un-suppress) note_detect');
+});
+
 test('_followerBusHandler share-ended on a local popup is a no-op (only meaningful for remote viewers)', () => {
     const mod = freshPlugin();
     mod._setFollowerForTest({ remote: false });
@@ -1369,6 +1390,31 @@ test('the drain skips re-invoking a parked filename that is already the current 
         delete global.window.playSong;
         console.error = origError;
     }
+});
+
+// Regression for splitscreen#72 review: _handleFollowerSongChange calls
+// teardownPanels() directly, and teardownPanels() takes its real-stop branch
+// (which un-suppresses note_detect's default singleton) unless the caller
+// sets _ssTransientTeardown first — exactly like rebuildLayout()/popOutPanel()
+// do on the main-window side. Without that guard, the very first host song
+// change in a follower window reopens the mic the earlier fix suppressed.
+test('_handleFollowerSongChange never un-suppresses note_detect while rebuilding', async () => {
+    const calls = [];
+    const mod = freshPlugin({ windowExtras: { createNoteDetector: { setDefaultSuppressed: (v) => calls.push(v) } } });
+    // The harness rebuild fails fast (no `highway`/`playSong` global) and the
+    // plugin logs-and-continues — silence the expected noise, same as the
+    // single-flight tests above. teardownPanels() runs synchronously before
+    // that failure, so the regression is observable either way.
+    const origError = console.error;
+    console.error = noop;
+    try {
+        mod._setCurrentFilenameForTest('current.sloppak');
+        await mod._handleFollowerSongChange('new.sloppak');
+    } finally {
+        console.error = origError;
+    }
+    assert.ok(!calls.includes(false),
+        'a follower song-change rebuild must never restore (un-suppress) note_detect');
 });
 
 test('follower interpolation derives the observed playback rate and stops at the extrapolation cap', () => {
@@ -2904,8 +2950,10 @@ test('startSplitScreen installs the panel-specific hw.resize override before cal
 // note_detect's default singleton on split (it would otherwise draw a second
 // HUD over panel 1) and a REAL stop restores it. Pinned here so the shared
 // _ssSetDefaultSuppressed() helper stays correct for both call sites — the
-// follower pages that suppress unconditionally and never restore are covered
-// by the ?ss= / pop-out tests above.
+// follower page's own teardown paths (song-change rebuild, orphaning) that
+// must suppress but never restore are covered by the ?ss= / pop-out tests
+// above and by the "never un-suppresses" regression tests near
+// _handleFollowerSongChange / share-ended orphaning.
 test('startSplitScreen suppresses note_detect\'s default singleton and a real stop restores it', async () => {
     const mod = freshLifecyclePlugin();
     const calls = [];

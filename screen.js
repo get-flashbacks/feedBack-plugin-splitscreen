@@ -5052,7 +5052,12 @@ try {
             _remoteWs = null;
             try { w.close(); } catch (_) {}
         }
-        try { teardownPanels(); } catch (_) {}   // also stops every panel highway / WS / rAF
+        // Orphaned is terminal (no reconnect), but still not a real stop for
+        // suppression purposes — this tab will never score anything again,
+        // so note_detect's default singleton should stay suppressed rather
+        // than reopening a mic on a dead viewer (splitscreen#72 review).
+        _ssTransientTeardown = true;
+        try { teardownPanels(); } catch (_) {} finally { _ssTransientTeardown = false; }   // also stops every panel highway / WS / rAF
         if (_followerToolbar) { try { _followerToolbar.remove(); } catch (_) {} _followerToolbar = null; }
         if (_followerToast) { try { _followerToast.remove(); } catch (_) {} _followerToast = null; }
         const o = document.createElement('div');
@@ -5571,7 +5576,13 @@ try {
         // grid keeps existing arrangement / mode / inverted / lefty / mastery.
         const cfgs = panels.map(p => _captureFollowerConfig(p));
 
-        teardownPanels();
+        // A layout change is a REBUILD, not a real stop — same reasoning as
+        // rebuildLayout()/popOutPanel() on the main-window side. Without this,
+        // teardownPanels() takes its real-stop branch and un-suppresses
+        // note_detect's default singleton (splitscreen#72 review), reopening
+        // the mic in a window that will never have anything to score.
+        _ssTransientTeardown = true;
+        try { teardownPanels(); } finally { _ssTransientTeardown = false; }
         active = false;
         buildFollowerLayout(cfgs, newLayoutKey);
     }
@@ -5603,7 +5614,12 @@ try {
         _followerAnchorPerf = 0;
         try {
             const cfgs = _captureAllFollowerConfigs();
-            teardownPanels();
+            // A song change is a REBUILD, not a real stop — see the same
+            // guard in rebuildFollowerLayout(). This is the common-path call
+            // site: without it, note_detect's suppression is undone on the
+            // very first host song switch (splitscreen#72 review).
+            _ssTransientTeardown = true;
+            try { teardownPanels(); } finally { _ssTransientTeardown = false; }
             active = false;
             await loadSongInFollower(newFilename, cfgs);
             // Briefly surface what the new song is so the popup viewer
