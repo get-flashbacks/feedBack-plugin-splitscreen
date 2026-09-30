@@ -640,6 +640,16 @@ try {
             return null;
         }
     })();
+    // A follower window is watch-only for its whole life, so note_detect's
+    // default singleton must never arm here. Arm it at the detection seam
+    // rather than only inside bootFollowerMode(): on the `?ss=<key>` path the
+    // boot waits for the host's first `config` round trip (and never arrives at
+    // all if the key is stale), while note_detect's construct-time auto-enable
+    // needs no song — during that window it can open a mic in a window that can
+    // never score, with the Detect button hidden behind `body.ss-follower`.
+    // bootFollowerMode() keeps its own call as defence for a future path that
+    // reaches follower boot without going through the URL parse.
+    if (FOLLOWER || REMOTE_JOIN) _ssSetDefaultSuppressed(true);
     const SS_CHANNEL_NAME = 'slopsmith-ss';
     let ssChannel = null;       // shared BroadcastChannel (lazily opened)
     /**
@@ -5127,6 +5137,19 @@ try {
      * Boot Follower Mode.
      */
     function bootFollowerMode() {
+        // A follower window (popped-out or a LAN/remote viewer) never owns
+        // scoring/detection — it slaves to the host's playhead and has no
+        // reason to open a mic. Without this, note_detect's default singleton
+        // auto-enables off its own persisted `detectPreference` and holds an
+        // input capture in a window that can never score, with the Detect
+        // button that could stop it hidden by the follower CSS below. Mirrors
+        // the suppression startSplitScreen() applies for local panels, applied
+        // unconditionally and never restored — a follower window is watch-only
+        // for its entire lifetime (its teardown uses teardownPanels(), so the
+        // real-stop restore in stopSplitScreen() can't run in one). Also armed
+        // at the follower-detection seam, so this is the belt-and-braces half.
+        _ssSetDefaultSuppressed(true);
+
         // Hide non-panel chrome with a single CSS rule so we don't have to
         // chase every element id slopsmith renders. The follower wrap covers
         // the viewport at a high z-index; #player (and our wrap) stay visible.

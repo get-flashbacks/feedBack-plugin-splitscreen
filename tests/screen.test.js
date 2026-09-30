@@ -24,7 +24,11 @@ function makeDocumentStub(onAddEventListener = noop) {
     return {
         getElementById: () => null,
         addEventListener: onAddEventListener,
-        body: { appendChild: noop },
+        // head/body.classList are what bootFollowerMode() touches (it injects
+        // the `body.ss-follower` stylesheet and adds the class); the plain
+        // evaluation path never needs them.
+        head: { appendChild: noop },
+        body: { appendChild: noop, classList: { add: noop, remove: noop } },
         createElement: () => ({
             style: {},
             classList: { add: noop, remove: noop },
@@ -43,9 +47,13 @@ function loadPlugin() {
     return require(PLUGIN_PATH);
 }
 
-function freshPlugin({ search = '', protocol = 'http:' } = {}) {
+function freshPlugin({ search = '', protocol = 'http:', windowExtras = null } = {}) {
     const location = { search, host: 'localhost:8420', protocol };
     global.window = { location, addEventListener: noop };
+    // Peer-plugin globals (e.g. note_detect's createNoteDetector) have to exist
+    // BEFORE the IIFE evaluates when the code under test arms suppression at
+    // evaluation time rather than on a later call.
+    if (windowExtras) Object.assign(global.window, windowExtras);
     global.document = makeDocumentStub();
     global.localStorage = makeLocalStorage();
     global.location = location;
@@ -348,6 +356,55 @@ test('loading with ?ss=<key> under the node test harness does not boot or throw'
     // exports its helpers, rather than opening real sockets / building DOM.
     const mod = freshPlugin({ search: '?ss=k7tr4m' });
     assert.equal(typeof mod.getSyncUrl, 'function');
+});
+
+// ── note_detect suppression in follower windows ────────────────────────────
+// A follower window (pop-out or LAN viewer) is watch-only, but note_detect's
+// default singleton auto-enables off its own persisted `detectPreference` and
+// opens an input capture anyway — with the Detect button that could stop it
+// hidden by the follower CSS. The suppression has to be armed the moment the
+// page identifies as a follower (the URL parse), NOT when bootFollowerMode()
+// runs: on `?ss=<key>` that boot waits for the host's first `config` (and
+// never arrives at all on a stale key), so suppression armed only there would
+// leave the whole page-load → first-`config` window exposed.
+
+test('a ?ss=<key> viewer suppresses note_detect at load, before any follower boot (plugin setter)', () => {
+    const calls = [];
+    freshPlugin({
+        search: '?ss=k7tr4m',
+        windowExtras: { createNoteDetector: { setDefaultSuppressed: (v) => calls.push(v) } },
+    });
+    // Nothing booted: the remote-join boot is gated out of the node harness
+    // (_nodeTestEnv), so this call can only have come from the follower
+    // detection seam at IIFE evaluation.
+    assert.deepEqual(calls, [true],
+        'note_detect\'s default singleton must be suppressed while the viewer is still on its "Connecting to host…" overlay');
+});
+
+test('a pop-out follower page suppresses note_detect at load (legacy flag, no plugin setter)', () => {
+    // requestAnimationFrame is stubbed to never fire: bootFollowerMode() defers
+    // loadSongInFollower() to the next frame, and the harness has no highway or
+    // playSong to drive it. Everything bootFollowerMode() does synchronously
+    // still runs — which is what the suppression rides on.
+    const hadRaf = 'requestAnimationFrame' in global;
+    const origRaf = global.requestAnimationFrame;
+    global.requestAnimationFrame = () => 0;
+    try {
+        freshPlugin({ search: '?ssFollower=1&filename=song.sloppak' });
+        assert.equal(global.window.__ndSuppressDefault, true,
+            'a pop-out window with no note_detect build must fall back to the shared __ndSuppressDefault flag');
+    } finally {
+        if (hadRaf) global.requestAnimationFrame = origRaf; else delete global.requestAnimationFrame;
+    }
+});
+
+test('a normal (non-follower) page leaves note_detect unsuppressed', () => {
+    const calls = [];
+    freshPlugin({ windowExtras: { createNoteDetector: { setDefaultSuppressed: (v) => calls.push(v) } } });
+    // The main player is the one window that DOES own detection, so the seam
+    // must not fire here — only a follower page suppresses the singleton.
+    assert.deepEqual(calls, []);
+    assert.equal(global.window.__ndSuppressDefault, undefined);
 });
 
 // ── LAYOUTS / applyLayoutStyle (splitscreen#1: CSS grid fix for the
@@ -2839,6 +2896,33 @@ test('startSplitScreen installs the panel-specific hw.resize override before cal
         }
     } finally {
         delete global.createHighway;
+        await mod.stopSplitScreen();
+    }
+});
+
+// The other half of the suppression contract: local panels suppress
+// note_detect's default singleton on split (it would otherwise draw a second
+// HUD over panel 1) and a REAL stop restores it. Pinned here so the shared
+// _ssSetDefaultSuppressed() helper stays correct for both call sites — the
+// follower pages that suppress unconditionally and never restore are covered
+// by the ?ss= / pop-out tests above.
+test('startSplitScreen suppresses note_detect\'s default singleton and a real stop restores it', async () => {
+    const mod = freshLifecyclePlugin();
+    const calls = [];
+    const ops = [];
+    let panelIndex = 0;
+    global.createHighway = () => makeOrderTrackingHighway(ops, panelIndex++);
+    // Read at call time (not at load), so assigning after freshLifecyclePlugin is fine.
+    global.window.createNoteDetector = { setDefaultSuppressed: (v) => calls.push(v) };
+    try {
+        await mod._getVizPluginsReadyForTest();
+        await mod.startSplitScreen([0, 1]);
+        assert.deepEqual(calls, [true], 'split must suppress the singleton HUD while panels are up');
+        await mod.stopSplitScreen();
+        assert.deepEqual(calls, [true, false], 'a real stop must hand detection back to the main player');
+    } finally {
+        delete global.createHighway;
+        delete global.window.createNoteDetector;
         await mod.stopSplitScreen();
     }
 });
