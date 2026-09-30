@@ -3128,6 +3128,14 @@ try {
             // per-panel viz overrides stay attached to this panel rather than
             // to whatever slot it lands in.
             vizId: panel.vizId || '',
+            // Carry the stable player identity across a follower rebuild too,
+            // mirroring panelToPrefs()'s playerId for the local-window path.
+            // Currently inert (no core consumer reads player_id across a
+            // rebuild yet), but cheap to keep correct now: without it,
+            // nextPlayerNumber (which follower rebuilds no longer reset,
+            // see _ssTransientTeardown) would mint a fresh incrementing id
+            // every song change instead of keeping the panel's own.
+            playerId: panel.playerId || '',
         };
     }
 
@@ -5467,6 +5475,15 @@ try {
             };
             const arrIdx = (cfg.arrangement >= 0 && cfg.arrangement < arrangements.length)
                 ? cfg.arrangement : 0;
+            // Restore this slot's stable player identity across a follower
+            // rebuild, same as the local-window restore at startSplitScreen's
+            // savedPrefs loop — keeps nextPlayerNumber from drifting once
+            // follower rebuilds stopped resetting it (_ssTransientTeardown).
+            if (cfg.playerId) {
+                panel.playerId = cfg.playerId;
+                const n = parseInt(String(cfg.playerId).replace(/^player-/, ''), 10);
+                if (Number.isFinite(n) && n >= nextPlayerNumber) nextPlayerNumber = n + 1;
+            }
             initPanel(panel, arrIdx, _followerCfgToPrefs(cfg, arrIdx));
 
             // Wire the panel's bar-toggle button. startSplitScreen() does
