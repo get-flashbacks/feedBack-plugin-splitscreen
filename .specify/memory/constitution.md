@@ -1,6 +1,6 @@
 # Split Screen Plugin Constitution
 
-The Split Screen plugin (id: `splitscreen`) renders 2–4 independent
+The Split Screen plugin (id: `splitscreen`) renders 2–6 independent
 highway panels side-by-side in the player, each showing a different
 arrangement of the same song, all slaved to the shared `<audio>`
 element. It supports popping a panel into a separate browser window
@@ -82,4 +82,4 @@ branches base off `origin/main`, NEVER `upstream/main`. PRs target
 plugin-integration surface (Path 1 / Path 2 from README) must update
 the README in the same PR.
 
-**Version**: 1.4.0 | **Ratified**: 2026-05-09 | **Last Amended**: 2026-05-09
+**Version**: 1.4.1 | **Ratified**: 2026-05-09 | **Last Amended**: 2026-10-01

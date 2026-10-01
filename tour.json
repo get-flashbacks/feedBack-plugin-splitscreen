@@ -21,7 +21,7 @@
             "id": "layout-picker",
             "selector": "#splitscreen-layout-btn",
             "title": "Pick a layout",
-            "content": "Top/bottom, left/right, or quad (four panels). Switch any time — your per-panel preferences carry over.",
+            "content": "Seven layouts, from two panels up to six: top/bottom, left/right, the two tris, quad, five, and six. Switch any time — your per-panel preferences carry over.",
             "shape": "spotlight",
             "position": "top"
         },
