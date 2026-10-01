@@ -14,7 +14,7 @@ try {
 
     /* ======================================================================
      *  Split Screen Plugin
-     *  Creates 2-4 independent highway panels, each showing a different
+     *  Creates 2-6 independent highway panels, each showing a different
      *  arrangement from the same song. All panels sync to the shared
      *  <audio> element.
      * ====================================================================== */

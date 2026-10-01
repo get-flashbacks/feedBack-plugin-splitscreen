@@ -28,6 +28,6 @@
   "script": "screen.js",
   "tour": "tour.json",
   "category": "creation",
-  "description": "Practice multiple arrangements at once — split into 2–4 synced panels, each with its own view, pop one out to another monitor, or share one to other devices on your network.",
+  "description": "Practice multiple arrangements at once — split into 2–6 synced panels, each with its own view, pop one out to another monitor, or share one to other devices on your network.",
   "icon": "assets/thumb.svg"
 }
