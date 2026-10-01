@@ -58,7 +58,7 @@ screen.js
 | `hideBtn` | element\|null | The `▾ Bar` button injected into `#player-controls` |
 | `floatBtn` | element\|null | The floating `▴ Controls` restore button appended to `#player` |
 | `_hostFramesSeen` | bool\|null | Whether the host exposes the coordinated-frame API — `null` until the first panel highway is inspected (splitscreen#69) |
-| `_lanRelayOk` | bool\|null | Whether the server's `/ws/sync` relay ever answered a share — `null` until one is attempted |
+| `_lanRelayOk` | bool\|null | Whether the server's `/ws/sync` relay answered the share in flight — `null` while none is (reset by `startLanShare`/`stopLanShare`) |
 | `_warnedOnce` | Set | Ids already reported by `_warnOnce()`, so an unsupported host is named once per page load |
 
 ## localStorage keys
@@ -354,7 +354,7 @@ Rules when touching these paths:
 
 - **Never raise the basic-mode floor because an optional feature needs a newer host.** A missing optional API must only disable its own feature.
 - **Every optional feature degrades quietly, so say it once.** `_warnOnce(id, msg)` names the core commit the host is missing; the LAN path additionally toasts via `_showMainToast` after `LAN_SHARE_DIAG_FAILURES` consecutive connect attempts that never open. Every never-opened attempt counts, including the `new WebSocket()` call that throws outright (mixed content, blocked scheme) and never reaches `onclose`. `_lanConnect`'s `opened` flag is what keeps a post-connect drop from being misreported as a missing relay — the reconnect loop keeps running either way, so a server upgraded mid-share recovers on its own.
-- **`_lanRelayOk` can only be `true`/`false` from a socket outcome** — `/ws/sync` is a server endpoint a page cannot feature-detect, hence the initial `null` (and `_hostFramesSeen`'s, meaning "no panel highway inspected yet").
+- **`_lanRelayOk` can only be `true`/`false` from a socket outcome** — `/ws/sync` is a server endpoint a page cannot feature-detect, hence the initial `null` (and `_hostFramesSeen`'s, meaning "no panel highway inspected yet"). `startLanShare`/`stopLanShare` reset it to `null`, so the reported verdict always belongs to the share still in flight rather than a finished one.
 - **One predicate per feature, shared by the probe and the call site.** `hostFeatures()` must not re-derive capability differently from the path that uses it: `playerIdentity` reads `_hasPlayerContextApi()` (the same check `_publishPanelContext` makes, so a namespace without `upsert` isn't reported as supported), and `_recordHostFrameApi()` answers "does this host have the coordinated-frame API" for both the probe and `beginOfflineRender`'s warning. The warning gates on exactly what `renderFrameAt()` will then reject, so it can't accuse a host of a gap it doesn't have.
 - `window.slopsmithSplitscreen.hostFeatures()` exposes the same answers to consumers (Visual Export uses it to avoid promising a deterministic frame the host can't produce). New optional host APIs get a row in that probe plus a `_warnOnce` at the guarded call site.
 

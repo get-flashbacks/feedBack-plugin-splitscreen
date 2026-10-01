@@ -721,8 +721,9 @@ try {
                 // Core 7633211 — window.feedBack.playerContexts.
                 playerIdentity: _hasPlayerContextApi(),
                 // Core 03e1c1d — the server's /ws/sync endpoint, which a page
-                // cannot feature-detect: null until a share has been attempted,
-                // then the socket's own outcome.
+                // cannot feature-detect: null whenever no share is in flight
+                // (start/stop reset it), so the verdict always belongs to the
+                // share that produced it rather than outliving it.
                 lanRelay: _lanRelayOk,
             };
         },
@@ -4149,6 +4150,9 @@ try {
         const key = ensureRoomKey();
         const cfg = panel ? _lanCaptureCfg(panel) : null;
         _lanShare = { key, cfg, ws: null, retryTimer: null, backoffMs: 1000, opened: false, failures: 0 };
+        // This share answers for itself: a previous share's verdict says
+        // nothing about whether the socket this one opens on gets a relay.
+        _lanRelayOk = null;
         try {
             localStorage.setItem('splitscreenLanShareActive', 'true');
             localStorage.setItem('splitscreenLanShareCfg', JSON.stringify(cfg));
@@ -4167,6 +4171,7 @@ try {
         const s = _lanShare;
         const ws = s.ws;
         _lanShare = null;                    // null first: onclose must not reconnect
+        _lanRelayOk = null;                  // the verdict dies with its share
         if (s.retryTimer) clearTimeout(s.retryTimer);
         // Send the terminal share-ended message directly against the captured
         // `ws`, not via _lanSend() — that reads the module-level _lanShare,
@@ -4235,7 +4240,7 @@ try {
             if (localStorage.getItem('splitscreenLanShareActive') !== 'true') return;
             let cfg = null;
             try { cfg = JSON.parse(localStorage.getItem('splitscreenLanShareCfg') || 'null'); } catch (_) {}
-            _lanShare = { key: ensureRoomKey(), cfg, ws: null, retryTimer: null, backoffMs: 1000 };
+            _lanShare = { key: ensureRoomKey(), cfg, ws: null, retryTimer: null, backoffMs: 1000, opened: false, failures: 0 };
             _lanConnect();
             _ensureMainBroadcasterAndListener();
             _startPopupBroadcaster();

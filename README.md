@@ -59,11 +59,11 @@ ss.hostFeatures();
 //   splitView:          true,          // window.createHighway is present
 //   coordinatedFrames:  true | false | null,  // core f7c761c; null = no panel built yet
 //   playerIdentity:     true | false,         // core 7633211
-//   lanRelay:           true | false | null,  // core 03e1c1d; null = no share attempted yet
+//   lanRelay:           true | false | null,  // core 03e1c1d; null = no share in flight
 // }
 ```
 
-`lanRelay` is the server's endpoint rather than a browser API, so it cannot be feature-detected: it stays `null` until a share has been attempted, then reports whether the current share's relay socket ever opened. Consecutive connect attempts that never open — including a `WebSocket` the browser refuses to construct at all — are counted, and once the third lands it is reported as a missing relay (on screen as well as in the console). The reconnect loop keeps running either way, so a server upgraded mid-share recovers on its own.
+`lanRelay` is the server's endpoint rather than a browser API, so it cannot be feature-detected: it is `null` whenever no share is in flight, and otherwise reports whether the current share's relay socket ever opened. Consecutive connect attempts that never open — including a `WebSocket` the browser refuses to construct at all — are counted, and once the third lands it is reported as a missing relay (on screen as well as in the console). The reconnect loop keeps running either way, so a server upgraded mid-share recovers on its own.
 
 ### Why there is no `minHost`
 

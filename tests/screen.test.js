@@ -3794,10 +3794,15 @@ test('beginOfflineRender warns once — naming core f7c761c — when no panel hi
     mod._setActiveForTest(true);
     mod._setPanelsForTest([{ hw: {} }, { hw: { setExternalFrameDriver() {} } }]);
 
-    const warnings = capturingWarnings(() => {
+    // Each pass is closed before the next one begins: a second beginOfflineRender()
+    // while one is already active returns early, so back-to-back calls would
+    // leave the dedup unexercised. setInterval is stubbed because endOfflineRender
+    // restarts the live audio-clock loop.
+    const warnings = withGlobals({ setInterval: () => 0 }, () => capturingWarnings(() => {
         global.window.slopsmithSplitscreen.beginOfflineRender();
+        global.window.slopsmithSplitscreen.endOfflineRender();
         global.window.slopsmithSplitscreen.beginOfflineRender();
-    });
+    }));
 
     assert.equal(warnings.length, 1, 'the same host gap must not be re-reported per call');
     assert.match(warnings[0], /f7c761c/);
@@ -3923,5 +3928,56 @@ test('a relay socket that opened once is not reported as missing after a later d
 
         assert.deepEqual(warnings, [], 'a host that connected once is serving the relay — a drop is a network blip');
         assert.equal(global.window.slopsmithSplitscreen.hostFeatures().lanRelay, true);
+    });
+});
+
+test('a finished share takes its relay verdict with it', () => {
+    const mod = freshPlugin();
+    const opened = [];
+    withGlobals({
+        BroadcastChannel: undefined,
+        WebSocket: fakeRelaySocket(opened),
+        setTimeout: () => 0,
+    }, () => {
+        capturingWarnings(() => {
+            mod.startLanShare(fakePanel());
+            opened[0].onopen();
+            assert.equal(global.window.slopsmithSplitscreen.hostFeatures().lanRelay, true);
+
+            mod.stopLanShare();
+            assert.equal(global.window.slopsmithSplitscreen.hostFeatures().lanRelay, null,
+                'no share is in flight, so there is no verdict to report');
+
+            mod.startLanShare(fakePanel());
+            assert.equal(global.window.slopsmithSplitscreen.hostFeatures().lanRelay, null,
+                'a new share knows nothing about the relay until its own socket opens');
+        });
+    });
+});
+
+test('a share diagnosed as missing does not report the old verdict for the next one', () => {
+    const mod = freshPlugin();
+    const opened = [];
+    withGlobals({
+        BroadcastChannel: undefined,
+        WebSocket: fakeRelaySocket(opened),
+        setTimeout: () => 0,
+    }, () => {
+        capturingWarnings(() => {
+            mod.startLanShare(fakePanel());
+            for (let i = 0; i < mod.LAN_SHARE_DIAG_FAILURES; i++) {
+                opened[opened.length - 1].onclose();
+                mod._lanConnect();
+            }
+            assert.equal(global.window.slopsmithSplitscreen.hostFeatures().lanRelay, false);
+
+            // A server upgraded (or a share that was simply stopped) between
+            // the two must not leave the next one looking like a dead relay.
+            mod.stopLanShare();
+            mod.startLanShare(fakePanel());
+            assert.equal(global.window.slopsmithSplitscreen.hostFeatures().lanRelay, null);
+            opened[opened.length - 1].onopen();
+            assert.equal(global.window.slopsmithSplitscreen.hostFeatures().lanRelay, true);
+        });
     });
 });
