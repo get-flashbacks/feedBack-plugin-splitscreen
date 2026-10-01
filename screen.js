@@ -198,8 +198,33 @@ try {
     let currentFilename = null;
     let arrangements = []; // arrangement list from song_info
 
+    // Every optional host feature is capability-checked, so an older feedBack
+    // runs the plugin perfectly well — which leaves "this host predates the
+    // API" and "this feature was never wired up" looking identical from the
+    // outside. Say each one once so a user (or a bug report) learns which host
+    // they're on without turning on debug logging (splitscreen#69).
+    const _warnedOnce = new Set();
+    /**
+     * Warn Once.
+     * @param {*} id
+     * @param {*} msg
+     */
+    function _warnOnce(id, msg) {
+        if (_warnedOnce.has(id)) return;
+        _warnedOnce.add(id);
+        console.warn('[splitscreen] ' + msg);
+    }
+
     function _playerContextApi() {
         return window.feedBack && window.feedBack.playerContexts;
+    }
+
+    // The one definition of "this host can publish a player context". hostFeatures()
+    // and the publish path must agree: a host that exposes the namespace without a
+    // usable upsert would otherwise be reported as supported and then never be.
+    function _hasPlayerContextApi() {
+        const api = _playerContextApi();
+        return !!(api && typeof api.upsert === 'function');
     }
 
     function _panelRole(panel) {
@@ -217,7 +242,15 @@ try {
 
     function _publishPanelContext(panel) {
         const api = _playerContextApi();
-        if (!api || typeof api.upsert !== 'function' || !panel) return null;
+        if (!_hasPlayerContextApi() || !panel) {
+            if (panel) {
+                _warnOnce('player-identity',
+                    'This feedBack build has no player-context API (core 7633211: '
+                    + 'window.feedBack.playerContexts) — panels stay anonymous to plugins that '
+                    + 'address players by context, and getPanels() reports a null player_context.');
+            }
+            return null;
+        }
         if (!panel.playerId) panel.playerId = `player-${nextPlayerNumber++}`;
         const role = _panelRole(panel);
         const arrangement = arrangements[panel.arrIndex] || {};
@@ -672,11 +705,44 @@ try {
         // to the single-instance main-player path when the user isn't split.
         isActive() { return active; },
 
+        // Which optional feedBack APIs this host actually provides
+        // (splitscreen#69). Every optional feature is capability-checked and
+        // degrades quietly, so this is the honest signal for a consumer
+        // (Visual Export deciding whether it can promise a deterministic
+        // frame) and for bug reports. `splitView` is the required floor —
+        // without it the plugin cannot build a panel at all.
+        hostFeatures() {
+            return {
+                splitView: typeof window.createHighway === 'function',
+                // Core f7c761c — Highway.renderFrame / renderFrameAt /
+                // setExternalFrameDriver. null until a panel highway has been
+                // inspected, so "not observed yet" never reads as "missing".
+                coordinatedFrames: _hostFramesSeen,
+                // Core 7633211 — window.feedBack.playerContexts.
+                playerIdentity: _hasPlayerContextApi(),
+                // Core 03e1c1d — the server's /ws/sync endpoint, which a page
+                // cannot feature-detect: null whenever no share is in flight
+                // (start/stop reset it), so the verdict always belongs to the
+                // share that produced it rather than outliving it.
+                lanRelay: _lanRelayOk,
+            };
+        },
+
         // Offline exporters supply each chart timestamp themselves. Suspend
         // the live audio-clock loop for that short render pass so all panels
         // paint the same requested instant, then restore it in endOfflineRender.
         beginOfflineRender() {
             if (!active || _offlineRenderActive) return;
+            _recordHostFrameApi();
+            // Same predicate renderFrameAt() validates below, so this names the
+            // gap the export will actually hit rather than a nearby one.
+            if (!panels.every((panel) => panel.hw && typeof panel.hw.renderFrameAt === 'function')) {
+                _warnOnce('coordinated-frames',
+                    'This feedBack build cannot render an offline frame for split panels (core '
+                    + 'f7c761c: Highway.renderFrameAt / renderFrame / setExternalFrameDriver) — '
+                    + 'renderFrameAt() will keep returning false, so no shared export frame can '
+                    + 'be produced.');
+            }
             _offlineRenderActive = true;
             _pauseLiveTimeSyncForOfflineRender();
         },
@@ -3739,13 +3805,31 @@ try {
     let _offlineRenderActive = false;
     const _frameRenderFailures = new WeakSet();
 
+    // Whether the running host exposes the coordinated-frame API (core
+    // f7c761c). Recorded from the first panel highways we inspect so
+    // hostFeatures() can report it without probing a global the plugin never
+    // touches; null until then (splitscreen#69).
+    let _hostFramesSeen = null;
+
     function _canDriveFrames(panel) {
         return !!(panel && panel.hw
             && typeof panel.hw.setExternalFrameDriver === 'function'
             && typeof panel.hw.renderFrame === 'function');
     }
 
+    // One rAF owns every panel frame when the host hands us that control
+    // (setExternalFrameDriver + renderFrame), and an offline export drives the
+    // panels itself (renderFrameAt) — so the host has the whole API, or the
+    // coordinated-rendering feature is only half there. Recorded once: the
+    // first panels we see are as good an answer as any later ones.
+    function _recordHostFrameApi() {
+        if (_hostFramesSeen !== null || !panels.length) return;
+        _hostFramesSeen = panels.some(_canDriveFrames)
+            && panels.every((panel) => panel.hw && typeof panel.hw.renderFrameAt === 'function');
+    }
+
     function _startDeterministicFrames() {
+        _recordHostFrameApi();
         // Keep the coordinator state separate from the transient rAF handle:
         // the handle is intentionally null while tick() is executing.
         _deterministicFramesActive = true;
@@ -3924,7 +4008,14 @@ try {
     //  crashes or reloads resumes publishing on the same key and viewers
     //  reconnect without interaction.
     // ══════════════════════════════════════════════════════════════════════
-    let _lanShare = null;          // { key, cfg, ws, retryTimer, backoffMs } | null
+    let _lanShare = null;          // { key, cfg, ws, retryTimer, backoffMs, opened, failures } | null
+    // /ws/sync is a server endpoint, so a page cannot feature-detect it — the
+    // socket's own outcome is the only evidence (and what hostFeatures()
+    // reports). Attempts that keep failing without ever opening mean this host
+    // predates the relay (core 03e1c1d), so say so once instead of retrying
+    // silently forever (splitscreen#69).
+    const LAN_SHARE_DIAG_FAILURES = 3;
+    let _lanRelayOk = null;
     let _lanLastTimeSentPerf = 0;
     // ~20 Hz on the network leg (the local BroadcastChannel stays ≤60 Hz).
     // The follower clock interpolates between messages, so this is visually
@@ -3964,14 +4055,47 @@ try {
     }
 
     /**
+     * Count an attempt that never opened, and report a missing relay once the
+     * threshold is crossed. Every failure route funnels through here —
+     * including a WebSocket constructor that throws outright (mixed content,
+     * a blocked scheme), which never reaches onclose and would otherwise
+     * retry forever in silence.
+     */
+    function _lanNoteConnectFailure() {
+        // A share that opened once proves the relay exists, so a later drop is
+        // an ordinary network blip and the backoff loop is the right answer.
+        if (!_lanShare || _lanShare.opened) return;
+        _lanShare.failures = (_lanShare.failures || 0) + 1;
+        if (_lanShare.failures !== LAN_SHARE_DIAG_FAILURES) return;
+        _lanRelayOk = false;
+        _warnOnce('lan-relay',
+            'This feedBack server does not answer the /ws/sync relay — LAN sharing needs a '
+            + 'host with that endpoint (core 03e1c1d, #1030). Everything else keeps working; '
+            + 'viewers can never join this share.');
+        _showMainToast('This feedBack server has no /ws/sync relay — LAN sharing needs a newer host (core 03e1c1d, #1030).');
+    }
+
+    /**
      * Lan Connect.
      */
     function _lanConnect() {
         if (!_lanShare || _lanShare.ws) return;
         let ws;
-        try { ws = new WebSocket(getSyncUrl(_lanShare.key)); } catch (_) { _lanScheduleReconnect(); return; }
+        try {
+            ws = new WebSocket(getSyncUrl(_lanShare.key));
+        } catch (_) {
+            _lanNoteConnectFailure();
+            _lanScheduleReconnect();
+            return;
+        }
         _lanShare.ws = ws;
-        ws.onopen = () => { if (_lanShare) _lanShare.backoffMs = 1000; };
+        ws.onopen = () => {
+            if (!_lanShare) return;
+            _lanShare.backoffMs = 1000;
+            _lanShare.failures = 0;
+            _lanShare.opened = true;
+            _lanRelayOk = true;
+        };
         ws.onmessage = (ev) => {
             if (!_lanShare) return;
             let msg = null;
@@ -3984,6 +4108,7 @@ try {
         ws.onclose = () => {
             if (!_lanShare || _lanShare.ws !== ws) return;
             _lanShare.ws = null;
+            _lanNoteConnectFailure();
             _lanScheduleReconnect();
         };
         ws.onerror = () => { try { ws.close(); } catch (_) {} };
@@ -4024,7 +4149,10 @@ try {
         }
         const key = ensureRoomKey();
         const cfg = panel ? _lanCaptureCfg(panel) : null;
-        _lanShare = { key, cfg, ws: null, retryTimer: null, backoffMs: 1000 };
+        _lanShare = { key, cfg, ws: null, retryTimer: null, backoffMs: 1000, opened: false, failures: 0 };
+        // This share answers for itself: a previous share's verdict says
+        // nothing about whether the socket this one opens on gets a relay.
+        _lanRelayOk = null;
         try {
             localStorage.setItem('splitscreenLanShareActive', 'true');
             localStorage.setItem('splitscreenLanShareCfg', JSON.stringify(cfg));
@@ -4043,6 +4171,7 @@ try {
         const s = _lanShare;
         const ws = s.ws;
         _lanShare = null;                    // null first: onclose must not reconnect
+        _lanRelayOk = null;                  // the verdict dies with its share
         if (s.retryTimer) clearTimeout(s.retryTimer);
         // Send the terminal share-ended message directly against the captured
         // `ws`, not via _lanSend() — that reads the module-level _lanShare,
@@ -4111,7 +4240,7 @@ try {
             if (localStorage.getItem('splitscreenLanShareActive') !== 'true') return;
             let cfg = null;
             try { cfg = JSON.parse(localStorage.getItem('splitscreenLanShareCfg') || 'null'); } catch (_) {}
-            _lanShare = { key: ensureRoomKey(), cfg, ws: null, retryTimer: null, backoffMs: 1000 };
+            _lanShare = { key: ensureRoomKey(), cfg, ws: null, retryTimer: null, backoffMs: 1000, opened: false, failures: 0 };
             _lanConnect();
             _ensureMainBroadcasterAndListener();
             _startPopupBroadcaster();
@@ -6032,6 +6161,8 @@ try {
             _setWrapForTest(next) { wrap = next; },
             stopLanShare,
             startLanShare,
+            _lanConnect,
+            LAN_SHARE_DIAG_FAILURES,
             _lanSend,
             _maybeResumeLanShare,
             _setCurrentFilenameForTest(next) { currentFilename = next; },
