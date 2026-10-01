@@ -42,6 +42,10 @@ function makeDocumentStub(onAddEventListener = noop) {
 
 const PLUGIN_PATH = path.join(__dirname, '..', 'screen.js');
 
+function readRepoFile(name) {
+    return require('node:fs').readFileSync(path.join(__dirname, '..', name), 'utf8');
+}
+
 function loadPlugin() {
     delete require.cache[require.resolve(PLUGIN_PATH)];
     return require(PLUGIN_PATH);
@@ -468,6 +472,106 @@ test('_bestFitLayout picks the smallest layout with room, and caps at six', () =
     assert.equal(_bestFitLayout(5), 'five');
     assert.equal(_bestFitLayout(6), 'six');
     assert.equal(_bestFitLayout(7), 'six'); // nothing bigger — caller must truncate
+});
+
+// ── Documented capacity vs LAYOUTS (splitscreen#71) ───────────────────────
+// The README led with "2–4 panels" / "Five layouts" for releases after the
+// grid layouts landed, and that stale summary is what dropped the four→six
+// increase from the v1.14.20 notes. Deriving the advertised numbers from
+// LAYOUTS means the next layout added without a doc update fails here.
+const NUMBER_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
+
+function panelRange(LAYOUTS) {
+    const counts = Object.values(LAYOUTS).map((l) => l.panels);
+    return { min: Math.min(...counts), max: Math.max(...counts) };
+}
+
+function sortedKeys(keys) {
+    return [...keys].sort();
+}
+
+// Reads `{ 'key': number }` entries out of a `const NAME = { ... }` literal.
+// Throws rather than returning an empty match so a renamed or refactored
+// declaration fails loudly instead of feeding vacuous assertions.
+function readPanelCountMap(src, name) {
+    const literal = src.match(new RegExp(`const ${name} = \\{([\\s\\S]*?)\\n    \\};`));
+    assert.ok(literal, `${name} literal not found in screen.js`);
+    const entries = [...literal[1].matchAll(/'([\w-]+)':\s*(\d+)/g)].map((m) => [m[1], Number(m[2])]);
+    assert.ok(entries.length > 0, `${name} literal parsed no entries`);
+    return new Map(entries);
+}
+
+// Reads the hand-written `{ value, label }` option list built after the element
+// carrying `id`. Both pickers use the same shape, so the id is the only
+// reliable way to tell the main window's list from the pop-out's.
+function readPickerOptionValues(src, id) {
+    const anchor = src.indexOf(id);
+    assert.ok(anchor > 0, `${id} not found in screen.js`);
+    const start = src.indexOf('const options = [', anchor);
+    const end = src.indexOf('];', start);
+    assert.ok(start > anchor && end > start, `${id} option list not found in screen.js`);
+    const values = [...src.slice(start, end).matchAll(/value:\s*'([\w-]+)'/g)].map((m) => m[1]);
+    assert.ok(values.length > 0, `${id} option list parsed no entries`);
+    return values;
+}
+
+test('README advertises the panel range and layout count LAYOUTS actually provides', () => {
+    const { LAYOUTS } = freshPlugin();
+    const { min, max } = panelRange(LAYOUTS);
+    const readme = readRepoFile('README.md');
+    const lede = readme.split('\n').find((l) => l.startsWith('A plugin for'));
+    assert.ok(lede, 'README lede paragraph not found');
+    assert.match(lede, new RegExp(`${min}–${max}[^.]*panels`),
+        `README lede should advertise the ${min}–${max} panel range LAYOUTS supports`);
+    const count = NUMBER_WORDS[Object.keys(LAYOUTS).length];
+    assert.ok(count, `no number word for ${Object.keys(LAYOUTS).length} layouts — extend NUMBER_WORDS`);
+    assert.match(readme, new RegExp(`\\b${count} layouts\\b`, 'i'),
+        `README should name ${count} layouts, one per LAYOUTS key`);
+});
+
+test('the default-layout setting offers exactly the LAYOUTS keys', () => {
+    const { LAYOUTS } = freshPlugin();
+    const settings = readRepoFile('settings.html');
+    const select = settings.slice(settings.indexOf('id="splitscreen-default-layout"'));
+    const close = select.indexOf('</select>');
+    assert.ok(close > 0, 'default-layout <select> not found in settings.html');
+    const offered = [...select.slice(0, close).matchAll(/<option value="([^"]+)"/g)].map((m) => m[1]);
+    // Order isn't load-bearing (a change writes the key back, not the index),
+    // so compare as a set — reordering LAYOUTS or the markup isn't drift.
+    assert.deepEqual(sortedKeys(offered), sortedKeys(Object.keys(LAYOUTS)),
+        'Settings → Split Screen default-layout picker must offer every LAYOUTS key');
+});
+
+test('the player toolbar layout picker offers exactly the LAYOUTS keys', () => {
+    const { LAYOUTS } = freshPlugin();
+    const offered = readPickerOptionValues(readRepoFile('screen.js'), 'splitscreen-layout-btn');
+    assert.deepEqual(sortedKeys(offered), sortedKeys(Object.keys(LAYOUTS)),
+        'the toolbar picker is a hand-written copy of LAYOUTS — both must be updated together');
+});
+
+test('pop-out layouts stay a strict subset of the main-window layouts', () => {
+    const { LAYOUTS } = freshPlugin();
+    const follower = readPanelCountMap(readRepoFile('screen.js'), 'FOLLOWER_LAYOUT_PANELS');
+    for (const key of follower.keys()) {
+        assert.ok(key === 'follower' || LAYOUTS[key], `${key} should be a main-window layout`);
+    }
+    // README advertises pop-outs as "up to Quad", with Five and Six main-window
+    // only, so this needs the exact set — a bare "max is smaller" check would
+    // still pass once 'five' lands here.
+    assert.deepEqual(sortedKeys(follower.keys()), ['follower', 'left-right', 'quad', 'top-bottom'],
+        'pop-out layouts should remain Single / Top-Bottom / Left-Right / Quad');
+    assert.match(readRepoFile('README.md'), /narrower layout set than the main window/,
+        'README should state that pop-out layouts are a narrower set than the main window\'s');
+});
+
+test('the pop-out layout picker offers exactly the pop-out layouts', () => {
+    // An option with no FOLLOWER_LAYOUT_PANELS entry is silently dead:
+    // rebuildFollowerLayout bails on the unknown key, so the popup's layout
+    // just never changes. Matching the map is what keeps the list honest.
+    const follower = readPanelCountMap(readRepoFile('screen.js'), 'FOLLOWER_LAYOUT_PANELS');
+    const offered = readPickerOptionValues(readRepoFile('screen.js'), 'follower-layout-select');
+    assert.deepEqual(sortedKeys(offered), sortedKeys(follower.keys()),
+        'every pop-out picker option needs a FOLLOWER_LAYOUT_PANELS entry to switch to');
 });
 
 test('deterministic frame coordination waits for a compatible panel without starting a no-op loop', () => {

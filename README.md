@@ -1,17 +1,17 @@
 # feedBack Plugin: Split Screen
 
-A plugin for [feedBack](https://github.com/got-feedback/feedBack) that shows 2–4 highway panels side-by-side during playback, each rendering a different arrangement of the same song. Practice lead and rhythm at once, watch bass against lead, or run a quad view of every arrangement a song has.
+A plugin for [feedBack](https://github.com/got-feedback/feedBack) that shows **2–6 synchronized panels** during playback, each rendering a different arrangement of the same song. Practice lead and rhythm at once, watch bass against lead, or run a five- or six-panel view of every arrangement a song has.
 
 ## Features
 
-- **Five layouts** — Top/Bottom (2P), Left/Right (2P), Tri 1+2 (3P, one on top + two on bottom), Tri 2+1 (3P, two on top + one on bottom), and Quad (4P, 2×2 grid)
+- **Seven layouts, 2–6 panels** — Top/Bottom (2P), Left/Right (2P), Tri 1+2 (3P, one on top + two on bottom), Tri 2+1 (3P, two on top + one on bottom), Quad (4P, 2×2 grid), Five (5P, 2 over 3), and Six (6P, 3×2 grid)
 - **Per-panel arrangement selector** — each panel has its own dropdown; swap what it renders mid-playback without restarting the song
 - **Per-panel visualization picker** — each panel can independently run any installed `slopsmithViz` plugin (e.g. the 3D highway) alongside the default 2D highway
 - **Per-panel invert toggle** — flip individual panels between player and audience perspective independently
 - **Per-panel note detection** — each panel can independently detect notes from a specific audio input channel; pairs with the [Note Detect](https://github.com/got-feedback/feedBack-plugin-notedetect) plugin for multi-guitar setups
 - **Name your panels** — each panel has an editable name label pinned to its **top-right corner**. The name persists across sessions, is **carried when you pop the panel out**, and is exposed to other plugins (e.g. [Camera Director](https://github.com/nimuart/cameradirector_feedback) targets each panel's 3D-highway camera by name) via the panel API below.
 - **Pop a panel into its own window** — click **⇱ Pop** at a panel's **top-right, next to its name**, to open it in a new browser window; drag it to a second monitor and resize it freely. The popup is muted and paused (it doesn't even decode the audio) and slaved to the main window's audio time, so there's still only one sound source. Click **⇲ Dock** (same spot) to send the panel back to its splitscreen slot; just closing the popup window instead removes that panel.
-- **Split a popped window internally** — every popup gets its own bottom toolbar with a layout picker (Single / Top-Bottom / Left-Right / Quad). A popped window can mirror the same layouts as the main splitter, so you can run e.g. a quad on a second monitor with all four arrangements while the main window stays single-panel.
+- **Split a popped window internally** — every popup gets its own bottom toolbar with a layout picker (Single / Top-Bottom / Left-Right / Quad). A pop-out window offers a **narrower layout set than the main window** — up to Quad, not the main window's Five and Six — so you can run e.g. a quad on a second monitor with all four arrangements while the main window stays single-panel.
 - **Hide/show bottom controls bar** — click **▾ Bar** (next to Close) to collapse the global player controls and reclaim the vertical space; a floating **▴ Controls** pill restores them
 - **Hide/show per-panel mini bar** — each panel has a **▾ Bar** button pinned to its bottom-right corner to collapse that panel's controls independently; click **▴ Bar** to restore
 - **Smart defaults** — opens with lead → rhythm → bass auto-assigned across panels when those arrangements exist, wrapping to fill the rest
@@ -66,7 +66,7 @@ Just **closing** the popup window does *not* re-dock the panel — it stays remo
 
 #### Splitting a popped window further
 
-Every popup has a small toolbar pinned to its bottom edge with a **Layout** picker. The same layouts available in main are available here: **Single**, **Top/Bottom**, **Left/Right**, **Quad**. Switching layouts inside a popup keeps the slots you already configured and fills any new ones (lead → rhythm → bass) using the same smart-defaults the main toggle uses. Each popup has its own layout independent of main and any other popups, so you can run e.g. a quad of all four arrangements on a second monitor while keeping main on a single 3D highway.
+Every popup has a small toolbar pinned to its bottom edge with a **Layout** picker offering **Single**, **Top/Bottom**, **Left/Right**, and **Quad** — a narrower set than the main window's seven, which run up to Six panels. Pop-out windows stop at Quad, so Five and Six are main-window only. Switching layouts inside a popup keeps the slots you already configured and fills any new ones (lead → rhythm → bass) using the same smart-defaults the main toggle uses. Each popup has its own layout independent of main and any other popups, so you can run e.g. a quad of all four arrangements on a second monitor while keeping main on a single 3D highway.
 
 > Pop-out uses standard `window.open` and `BroadcastChannel`. The popup must be triggered by your click (a user gesture) so popup blockers should leave it alone — but if your browser does block it (or doesn't support `BroadcastChannel`), the panel stays put and you get a brief notice instead. If you close the main window while popups are open, each popup detects it and shows a "main window closed" notice so you know to close it (best-effort — if the browser doesn't deliver that last message the popup just freezes, same as before).
 
@@ -90,7 +90,7 @@ Requirements & caveats:
 
 ## Settings
 
-Open **Settings → Split Screen** to pick the default layout (Top/Bottom, Left/Right, Tri 1+2, Tri 2+1, or Quad). The choice is stored in `localStorage` as `splitscreenLayout` and applies the next time you toggle split screen on.
+Open **Settings → Split Screen** to pick the default layout (Top/Bottom, Left/Right, Tri 1+2, Tri 2+1, Quad, Five, or Six). The choice is stored in `localStorage` as `splitscreenLayout` and applies the next time you toggle split screen on. The same seven layouts sit in the layout picker in the player toolbar whenever split screen is active, whatever the default is.
 
 ## Note Detection
 
@@ -217,7 +217,7 @@ window.createMyVisualization = function ({ container }) {
 
 | Rule | Why |
 |------|-----|
-| **No shared mutable state** | Split screen may create 2–4 instances simultaneously. Each needs its own canvas, WebSocket, RAF handle, and state. Refactor module-level variables into closures — everything lives inside the factory call, like `createLyricsPane()` does. |
+| **No shared mutable state** | Split screen may create 2–6 instances simultaneously (one per panel). Each needs its own canvas, WebSocket, RAF handle, and state. Refactor module-level variables into closures — everything lives inside the factory call, like `createLyricsPane()` does. |
 | **Decode the filename** | `currentFilename` always arrives percent-encoded (every caller — the grid, v3's `songs.js`, `player.start()` — encodes it before calling `playSong`). Call `decodeURIComponent(filename)` before building the WebSocket URL to avoid double-encoding slashes. |
 | **Sync to `<audio>` directly** | Read `document.getElementById('audio').currentTime` in your RAF loop. The `setTime()` call from split screen's time sync loop is for highway instances only. |
 | **Clean up completely in `destroy()`** | Cancel RAF, close WebSocket, remove any DOM nodes you added inside the container. Split screen removes the container div itself. |
