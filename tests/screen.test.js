@@ -3669,3 +3669,259 @@ test('_startFollowerInterp is idempotent — a second call while already running
         global.cancelAnimationFrame = originalCaf;
     }
 });
+
+// ── Host-feature diagnostics (splitscreen#69) ──────────────────────────────
+// Optional features are capability-checked, so an older host runs the plugin
+// fine — but silently. These tests pin the two halves of the fix: hostFeatures()
+// reports what the running core actually provides, and each unsupported feature
+// says so once, naming the core commit that added the API it wants. Without a
+// diagnostic, "your host is too old" and "this feature is broken" are the same
+// bug report.
+
+// console.warn is replaced (not the whole console) so the runner keeps its own
+// output; the captured lines are what the assertions below read.
+function capturingWarnings(body) {
+    const original = console.warn;
+    const warnings = [];
+    console.warn = (...args) => { warnings.push(args.join(' ')); };
+    try {
+        body(warnings);
+    } finally {
+        console.warn = original;
+    }
+    return warnings;
+}
+
+// A missing optional feature is a user-facing dead end, not just a console
+// line, so the relay diagnosis also toasts. The harness's createElement stub is
+// wrapped to keep whatever text _showMainToast put on the node it built.
+function capturingToasts(body) {
+    const original = global.document.createElement;
+    const toasts = [];
+    global.document.createElement = (tag) => {
+        const el = original(tag);
+        toasts.push(el);
+        return el;
+    };
+    try {
+        body();
+    } finally {
+        global.document.createElement = original;
+    }
+    return toasts.map((el) => el.textContent).filter(Boolean);
+}
+
+test('hostFeatures reports the host as missing every optional feature on a bare core', () => {
+    const mod = freshPlugin();
+    assert.deepEqual(global.window.slopsmithSplitscreen.hostFeatures(), {
+        splitView: false,          // no window.createHighway in the Node harness
+        coordinatedFrames: null,   // no panel highway inspected yet — not "missing"
+        playerIdentity: false,
+        lanRelay: null,            // /ws/sync is a server endpoint: not probed yet
+    });
+});
+
+test('hostFeatures reflects window.createHighway for the required split-view floor', () => {
+    const mod = freshPlugin();
+    const original = global.window.createHighway;
+    global.window.createHighway = () => ({});
+    try {
+        assert.equal(global.window.slopsmithSplitscreen.hostFeatures().splitView, true);
+    } finally {
+        if (original === undefined) delete global.window.createHighway;
+        else global.window.createHighway = original;
+    }
+});
+
+test('hostFeatures reports playerIdentity from window.feedBack.playerContexts', () => {
+    const mod = freshPlugin();
+    global.window.feedBack = { playerContexts: { upsert() {}, leave() {} } };
+    assert.equal(global.window.slopsmithSplitscreen.hostFeatures().playerIdentity, true);
+});
+
+test('hostFeatures reports playerIdentity false for a namespace it cannot publish through', () => {
+    const mod = freshPlugin();
+    // A host exposing the namespace without upsert() is not a usable
+    // player-context API: reporting true here would promise an identity the
+    // publish path silently drops.
+    global.window.feedBack = { playerContexts: { leave() {} } };
+    assert.equal(global.window.slopsmithSplitscreen.hostFeatures().playerIdentity, false);
+});
+
+test('hostFeatures reports coordinatedFrames true once a panel highway exposes the frame API', () => {
+    const mod = freshPlugin();
+    mod._setActiveForTest(true);
+    mod._setPanelsForTest([{ hw: { setExternalFrameDriver() {}, renderFrame() {}, renderFrameAt() {} } }]);
+
+    const warnings = capturingWarnings(() => {
+        global.window.slopsmithSplitscreen.beginOfflineRender();
+    });
+
+    assert.deepEqual(warnings, []);
+    assert.equal(global.window.slopsmithSplitscreen.hostFeatures().coordinatedFrames, true);
+});
+
+test('hostFeatures reports coordinatedFrames false once a panel highway lacks the frame API', () => {
+    const mod = freshPlugin();
+    mod._setActiveForTest(true);
+    mod._setPanelsForTest([{ hw: {} }]);
+
+    capturingWarnings(() => {
+        global.window.slopsmithSplitscreen.beginOfflineRender();
+    });
+
+    assert.equal(global.window.slopsmithSplitscreen.hostFeatures().coordinatedFrames, false);
+});
+
+test('hostFeatures reports coordinatedFrames false when only the live half of the frame API is present', () => {
+    const mod = freshPlugin();
+    mod._setActiveForTest(true);
+    // setExternalFrameDriver + renderFrame without renderFrameAt: the live
+    // coordinator works, an offline export cannot. The feature is half there,
+    // and the probe must not claim it.
+    mod._setPanelsForTest([{ hw: { setExternalFrameDriver() {}, renderFrame() {} } }]);
+
+    const warnings = capturingWarnings(() => {
+        global.window.slopsmithSplitscreen.beginOfflineRender();
+    });
+
+    assert.equal(warnings.length, 1);
+    assert.equal(global.window.slopsmithSplitscreen.hostFeatures().coordinatedFrames, false);
+});
+
+test('beginOfflineRender warns once — naming core f7c761c — when no panel highway can render a frame at a time', () => {
+    const mod = freshPlugin();
+    mod._setActiveForTest(true);
+    mod._setPanelsForTest([{ hw: {} }, { hw: { setExternalFrameDriver() {} } }]);
+
+    const warnings = capturingWarnings(() => {
+        global.window.slopsmithSplitscreen.beginOfflineRender();
+        global.window.slopsmithSplitscreen.beginOfflineRender();
+    });
+
+    assert.equal(warnings.length, 1, 'the same host gap must not be re-reported per call');
+    assert.match(warnings[0], /f7c761c/);
+});
+
+test('beginOfflineRender stays silent when every panel highway exposes the frame API', () => {
+    const mod = freshPlugin();
+    mod._setActiveForTest(true);
+    mod._setPanelsForTest([{ hw: { setExternalFrameDriver() {}, renderFrame() {}, renderFrameAt() {} } }]);
+
+    const warnings = capturingWarnings(() => {
+        global.window.slopsmithSplitscreen.beginOfflineRender();
+    });
+
+    assert.deepEqual(warnings, []);
+});
+
+test('setPlayerContext warns once — naming core 7633211 — on a host with no player-context API', () => {
+    const mod = freshPlugin();
+    mod._setPanelsForTest([{ hw: {} }]);
+
+    const warnings = capturingWarnings(() => {
+        global.window.slopsmithSplitscreen.setPlayerContext(0, { skill: 'overall' });
+        global.window.slopsmithSplitscreen.setPlayerContext(0, { skill: 'lead' });
+    });
+
+    assert.equal(warnings.length, 1, 'a host without the API must not warn on every panel publish');
+    assert.match(warnings[0], /7633211/);
+});
+
+test('setPlayerContext stays silent on a host that provides player-context', () => {
+    const mod = freshPlugin();
+    const upserts = [];
+    global.window.feedBack = {
+        playerContexts: { upsert: (input) => { upserts.push(input); return input; }, leave() {} },
+    };
+    mod._setPanelsForTest([{ hw: {} }]);
+
+    const warnings = capturingWarnings(() => {
+        global.window.slopsmithSplitscreen.setPlayerContext(0, { skill: 'lead' });
+    });
+
+    assert.deepEqual(warnings, []);
+    assert.equal(upserts.length, 1);
+});
+
+test('a relay socket that never opens is diagnosed once, then reconnect attempts keep going', () => {
+    const mod = freshPlugin();
+    const opened = [];
+    withGlobals({
+        BroadcastChannel: undefined, // absent → _ssChannel's null path — see section comment
+        WebSocket: fakeRelaySocket(opened),
+        setTimeout: () => 0,          // the backoff timer must not fire for real
+    }, () => {
+        let warnings;
+        const toasts = capturingToasts(() => {
+            warnings = capturingWarnings(() => {
+                mod.startLanShare(fakePanel());
+                // Each close drops _lanShare.ws, so the reconnect has to be driven
+                // explicitly — exactly what the backoff timer does in the browser.
+                for (let i = 0; i < mod.LAN_SHARE_DIAG_FAILURES - 1; i++) {
+                    opened[opened.length - 1].onclose();
+                    assert.equal(global.window.slopsmithSplitscreen.hostFeatures().lanRelay, null,
+                        'a socket that has not failed enough times yet proves nothing');
+                    mod._lanConnect();
+                }
+                opened[opened.length - 1].onclose(); // the failure that crosses the threshold
+                mod._lanConnect();
+            });
+        });
+
+        assert.equal(warnings.length, 1, 'the missing-relay diagnosis must not repeat on every retry');
+        assert.match(warnings[0], /\/ws\/sync/);
+        assert.match(warnings[0], /03e1c1d/);
+        // A console line nobody reads is not a diagnostic: a viewer who opens
+        // the share dialog and watches nothing join needs this on screen.
+        assert.equal(toasts.length, 1, 'the missing-relay diagnosis must reach the user, not just the console');
+        assert.match(toasts[0], /\/ws\/sync/);
+        assert.match(toasts[0], /03e1c1d/);
+        assert.equal(global.window.slopsmithSplitscreen.hostFeatures().lanRelay, false);
+        assert.equal(opened.length, mod.LAN_SHARE_DIAG_FAILURES + 1,
+            'the diagnosis must not stop the reconnect loop — a server upgraded mid-share recovers on its own');
+    });
+});
+
+test('a WebSocket that cannot even be constructed is diagnosed like a socket that never opens', () => {
+    const mod = freshPlugin();
+    let scheduled = 0;
+    withGlobals({
+        BroadcastChannel: undefined,
+        // Mixed content or a blocked scheme: the constructor throws, so there is
+        // no socket and therefore no onclose to notice it.
+        WebSocket: function () { throw new Error('blocked'); },
+        setTimeout: () => { scheduled++; return 0; },
+    }, () => {
+        const warnings = capturingWarnings(() => {
+            mod.startLanShare(fakePanel());
+            for (let i = 0; i < mod.LAN_SHARE_DIAG_FAILURES - 1; i++) mod._lanConnect();
+        });
+
+        assert.equal(warnings.length, 1, 'a throw path that skipped the counter would retry in silence forever');
+        assert.match(warnings[0], /03e1c1d/);
+        assert.equal(global.window.slopsmithSplitscreen.hostFeatures().lanRelay, false);
+        assert.ok(scheduled >= mod.LAN_SHARE_DIAG_FAILURES, 'each attempt must still back off and retry');
+    });
+});
+
+test('a relay socket that opened once is not reported as missing after a later drop', () => {
+    const mod = freshPlugin();
+    const opened = [];
+    withGlobals({
+        BroadcastChannel: undefined,
+        WebSocket: fakeRelaySocket(opened),
+        setTimeout: () => 0,
+    }, () => {
+        const warnings = capturingWarnings(() => {
+            mod.startLanShare(fakePanel());
+            opened[0].onopen();
+            opened[0].onclose();
+            mod._lanConnect();
+            opened[1].onclose();
+        });
+
+        assert.deepEqual(warnings, [], 'a host that connected once is serving the relay — a drop is a network blip');
+        assert.equal(global.window.slopsmithSplitscreen.hostFeatures().lanRelay, true);
+    });
+});

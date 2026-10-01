@@ -18,6 +18,7 @@ screen.js
 ├── Teardown / rebuild           — teardownPanels, rebuildLayout, captureCurrentPrefs
 ├── Start / stop                 — startSplitScreen, stopSplitScreen, toggle
 ├── Time sync                    — startTimeSync, stopTimeSync
+├── Host-feature diagnostics     — _warnOnce, hostFeatures(), _hostFramesSeen, _lanRelayOk
 ├── Toolbar buttons              — createLayoutBtn, createHideBtn, createFloatingShowBtn,
 │                                  togglePanelBar, toggleControlsVisibility, updateBtn, injectBtn
 └── Hooks into core              — wraps window.playSong, listens for screen:changing
@@ -36,6 +37,7 @@ screen.js
 | `VIZ_PREFIX` | `'__viz__'` | Prefix for generic viz-plugin entries. Select value: `__viz__:<pluginId>:<arrIndex>`; saved pref: `__viz__:<pluginId>:<arrName>` |
 | `DETECT_CHANNEL_CYCLE` | `['mono','left','right']` | Channel cycle order |
 | `DETECT_CHANNEL_LABELS` | `{mono:'M',left:'L',right:'R'}` | Channel button labels |
+| `LAN_SHARE_DIAG_FAILURES` | `3` | Consecutive `/ws/sync` connect attempts that never open before splitscreen reports the relay missing (splitscreen#69) |
 
 ## Module-level state
 
@@ -55,6 +57,9 @@ screen.js
 | `layoutBtn` | element\|null | The layout `<select>` injected into `#player-controls` |
 | `hideBtn` | element\|null | The `▾ Bar` button injected into `#player-controls` |
 | `floatBtn` | element\|null | The floating `▴ Controls` restore button appended to `#player` |
+| `_hostFramesSeen` | bool\|null | Whether the host exposes the coordinated-frame API — `null` until the first panel highway is inspected (splitscreen#69) |
+| `_lanRelayOk` | bool\|null | Whether the server's `/ws/sync` relay ever answered a share — `null` until one is attempted |
+| `_warnedOnce` | Set | Ids already reported by `_warnOnce()`, so an unsupported host is named once per page load |
 
 ## localStorage keys
 
@@ -333,6 +338,25 @@ The plugin capability-checks all external factories at runtime and gracefully di
 Retired (splitscreen#47): `window.createJumpingTabPane` and `window.createTabView` — both plugins dropped their standalone-pane factories for the viz-factory contract above, so nothing in this file feature-detects them anymore.
 
 The `{ onSongInfo: () => {} }` passed to `hw.connect()` suppresses the default behavior where receiving `song_info` would overwrite the main player's HUD, audio element, and arrangement dropdown. This is required for every panel WebSocket connection. See slopsmith issue #27.
+
+## Host compatibility (splitscreen#69)
+
+The plugin's features span several core API generations, so there is **no `minHost` in `plugin.json`** — one unqualified claim would hide three degraded modes. Core's loader exposes `minHost` as metadata only (no frontend enforcement found in the inspected checkout), and the basic-mode floor has not been exercised end-to-end against a released host, so declaring a value today would advertise something untested. The per-feature matrix (user-facing copy, keep in sync with this table) lives in README.md under "Host compatibility".
+
+| Feature | Required? | Host API | Core commit |
+|---|---|---|---|
+| Basic split view | **Required** | `window.createHighway` + `setRenderer` lifecycle + chart/playback access | source-level present at tag `v0.3.0-alpha.1` (not certified end-to-end) |
+| LAN sharing | Optional | server `/ws/sync/{session_id}` | `03e1c1d` (#1030/#1032) — on canonical and fork `main` |
+| Coordinated / offline frame rendering | Optional | `Highway.renderFrame` / `renderFrameAt` / `setExternalFrameDriver` | `f7c761c` (#81) — fork only |
+| Per-player identity / targeted difficulty | Optional | `window.feedBack.playerContexts`, `player-difficulty.v1` | `7633211` (#83) — fork only |
+
+Rules when touching these paths:
+
+- **Never raise the basic-mode floor because an optional feature needs a newer host.** A missing optional API must only disable its own feature.
+- **Every optional feature degrades quietly, so say it once.** `_warnOnce(id, msg)` names the core commit the host is missing; the LAN path additionally toasts via `_showMainToast` after `LAN_SHARE_DIAG_FAILURES` consecutive connect attempts that never open. Every never-opened attempt counts, including the `new WebSocket()` call that throws outright (mixed content, blocked scheme) and never reaches `onclose`. `_lanConnect`'s `opened` flag is what keeps a post-connect drop from being misreported as a missing relay — the reconnect loop keeps running either way, so a server upgraded mid-share recovers on its own.
+- **`_lanRelayOk` can only be `true`/`false` from a socket outcome** — `/ws/sync` is a server endpoint a page cannot feature-detect, hence the initial `null` (and `_hostFramesSeen`'s, meaning "no panel highway inspected yet").
+- **One predicate per feature, shared by the probe and the call site.** `hostFeatures()` must not re-derive capability differently from the path that uses it: `playerIdentity` reads `_hasPlayerContextApi()` (the same check `_publishPanelContext` makes, so a namespace without `upsert` isn't reported as supported), and `_recordHostFrameApi()` answers "does this host have the coordinated-frame API" for both the probe and `beginOfflineRender`'s warning. The warning gates on exactly what `renderFrameAt()` will then reject, so it can't accuse a host of a gap it doesn't have.
+- `window.slopsmithSplitscreen.hostFeatures()` exposes the same answers to consumers (Visual Export uses it to avoid promising a deterministic frame the host can't produce). New optional host APIs get a row in that probe plus a `_warnOnce` at the guarded call site.
 
 ## Adding a new panel mode
 

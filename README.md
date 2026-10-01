@@ -27,7 +27,49 @@ git clone https://github.com/got-feedBack/feedBack-plugin-splitscreen.git splits
 docker compose restart
 ```
 
-**Compatibility** — splitscreen runs on any feedBack core. On cores with the `highway:visibility` plugin API (~0.2.7.1+), a visualization plugin that mounts a sibling overlay — e.g. the 3D Highway's WebGL overlay — hides itself cleanly while splitscreen is active. On older cores that overlay may bleed through the panels; update the core (and the 3D Highway plugin) to fix it.
+**Compatibility** — split view itself runs on any feedBack core that exposes the highway factory; each *optional* feature needs its own host API. See [Host compatibility](#host-compatibility) for the per-feature requirements and what you lose without them.
+
+## Host compatibility
+
+Split screen's features span several generations of core API, so there is no single version string that describes them. This plugin therefore declares **no `minHost`** in its manifest — see [Why there is no `minHost`](#why-there-is-no-minhost) — and documents the requirement per feature instead.
+
+| Feature | Required? | Needs from the host | Added in | Without it |
+|---------|-----------|---------------------|----------|------------|
+| **Basic split view** — layouts, per-panel arrangement, invert/lefty, visualization picker, lyrics pane, pop-out to a second monitor on *this* machine | **Required** | `window.createHighway()` plus the per-instance renderer lifecycle (`setRenderer`), chart access and the playback clock | core `v0.3.0-alpha.1` (source-level check — see the note below) | The plugin cannot build a panel. |
+| **LAN sharing** (📡) | Optional | The server's `/ws/sync/{session_id}` relay endpoint | [`03e1c1d`](https://github.com/got-feedBack/feedBack/commit/03e1c1d) — *feat(server): session-sync relay WebSocket* (core #1030/#1032), 22 Jul 2026 | The dialog opens but no viewer can ever join. Everything else — including pop-out on this machine — is unaffected. |
+| **Coordinated / offline frame rendering** (Visual Export and anything else asking for one shared frame) | Optional | `Highway.renderFrame`, `renderFrameAt`, `setExternalFrameDriver` | [`f7c761c`](https://github.com/got-feedBack/feedBack/commit/f7c761c) — *feat(highway): add coordinated frame rendering* (fork [#81](https://github.com/get-flashbacks/feedBack/issues/81)) | Live panels keep their own render loops, which is invisible during play; an offline export cannot paint a shared frame. |
+| **Per-player identity + targeted difficulty** (publishing a player context per panel) | Optional | `window.feedBack.playerContexts` and the `player-difficulty.v1` capability | [`7633211`](https://github.com/got-feedBack/feedBack/commit/7633211) — *core: add player identity capability for concurrent play* (fork [#83](https://github.com/get-flashbacks/feedBack/issues/83)) | Panels stay anonymous to plugins that address players by context; panel names, the visualization picker and every panel feature keep working. |
+
+Notes on the "Added in" column:
+
+- **`03e1c1d` (LAN relay)** is on `main` of both [got-feedBack/feedBack](https://github.com/got-feedBack/feedBack) and the [get-flashbacks/feedBack](https://github.com/get-flashbacks/feedBack) fork.
+- **`f7c761c` and `7633211` are merged in the fork only** — neither is on canonical `main` yet (their core issues are the fork's [#81](https://github.com/get-flashbacks/feedBack/issues/81) and [#83](https://github.com/get-flashbacks/feedBack/issues/83)). Running splitscreen against canonical core gives you basic split view and LAN sharing, but not coordinated rendering or per-player identity.
+- **Basic mode on `v0.3.0-alpha.1` is a source-level finding, not an end-to-end certification.** That tag's `static/highway.js` exposes `createHighway` and the `setRenderer` lifecycle, and every `hw.*` method split screen calls in basic mode (`connect`, `init`, `setTime`, `setInverted`/`setLefty`/`setMastery` and their getters, `resize`, `stop`, `setLyricsVisible`, `getRenderScale`, `hasPhraseData`, `_onReady`), and its `static/index.html` loads that file as a classic script, so the factory lands on `window`. It has no `renderFrame`/`renderFrameAt`/`setExternalFrameDriver`, which is exactly why those are a separate row.
+
+Not a requirement, but worth knowing: on cores with the `highway:visibility` plugin API (~0.2.7.1+), a visualization plugin that mounts a sibling overlay — e.g. the 3D Highway's WebGL overlay — hides itself cleanly while split view is active. On older cores that overlay may bleed through the panels; update the core (and the 3D Highway plugin) to fix it.
+
+### Checking your host
+
+Every optional feature is capability-checked and degrades quietly, so the plugin itself never blocks on an old core. It does tell you once, in the console, when a host is missing an API a feature needs — and it exposes the same answer programmatically:
+
+```js
+const ss = window.feedBackSplitscreen || window.slopsmithSplitscreen;
+ss.hostFeatures();
+// {
+//   splitView:          true,          // window.createHighway is present
+//   coordinatedFrames:  true | false | null,  // core f7c761c; null = no panel built yet
+//   playerIdentity:     true | false,         // core 7633211
+//   lanRelay:           true | false | null,  // core 03e1c1d; null = no share attempted yet
+// }
+```
+
+`lanRelay` is the server's endpoint rather than a browser API, so it cannot be feature-detected: it stays `null` until a share has been attempted, then reports whether the current share's relay socket ever opened. Consecutive connect attempts that never open — including a `WebSocket` the browser refuses to construct at all — are counted, and once the third lands it is reported as a missing relay (on screen as well as in the console). The reconnect loop keeps running either way, so a server upgraded mid-share recovers on its own.
+
+### Why there is no `minHost`
+
+The core plugin loader exposes `minHost` as metadata; no frontend enforcement was found in the inspected core checkout, so a value would not stop an incompatible install — it would only be a claim. Basic mode has not been tested end-to-end against a released host yet, and its floor (`v0.3.0-alpha.1`) is a source-level reading rather than a certified one, so declaring it would advertise something untested. The floor is also deliberately **not** raised by the optional features: LAN sharing, coordinated rendering and per-player identity each need a newer core, but their absence never stops basic split view.
+
+Once a host build has been exercised against the basic path end to end, the floor belongs here — and in `plugin.json` — as a tested minimum. Core-side tracking: [feedBack#102](https://github.com/get-flashbacks/feedBack/issues/102).
 
 ## Usage
 
@@ -81,12 +123,12 @@ The **room key** is generated once and saved (Settings → Split Screen shows it
 Requirements & caveats:
 
 - The server must be reachable on your LAN. On the desktop app, enable **LAN access** (Plugin Manager → Network); Docker/standalone servers just need the port reachable. Your OS firewall may prompt once.
-- Needs a server with the `/ws/sync` relay endpoint (feedBack ≥ the #1030 relay). On an older server, LAN sharing simply won't connect; everything else is unaffected.
+- Needs a server with the `/ws/sync` relay endpoint (core [`03e1c1d`](https://github.com/got-feedBack/feedBack/commit/03e1c1d), the core #1030 relay). On an older server, LAN sharing never connects — split view says so once, both on screen and in the console, and everything else is unaffected.
 - Viewer devices need WebGL2 for the 3D highway (any recent tablet/laptop is fine; the renderer auto-scales on weak GPUs).
 - Browsers only keep screens awake on secure pages, so a tablet viewing over plain `http://` may sleep mid-song — tap it awake, or raise the device's screen-timeout for the session.
 - If your machine's LAN IP changes (DHCP), bookmarked URLs go stale — give it a DHCP reservation in your router if that bites.
 
-**Security note:** the LAN share room follows feedBack's overall trusted-network design — the room key controls *discovery*, not authentication. `/ws/sync/{room_key}` is a broadcast room: anyone who joins with the key (not just the host) can send playback/session messages that every other viewer treats as authoritative. This is only a concern if you share your key with, or otherwise expose your server to, people or devices you don't trust on that network — the same trust boundary as every other unauthenticated route in the app. A real fix would need host-issued per-connection tokens in feedBack core, which isn't planned while the app has no broader auth layer (see [splitscreen#24](https://github.com/get-flashbacks/feedBack-plugin-splitscreen/issues/24)).
+**Security note:** the LAN share room follows feedBack's overall trusted-network design — the room key controls *discovery*, not authentication. `/ws/sync/{session_id}` is a broadcast room: anyone who joins with the key (not just the host) can send playback/session messages that every other viewer treats as authoritative. This is only a concern if you share your key with, or otherwise expose your server to, people or devices you don't trust on that network — the same trust boundary as every other unauthenticated route in the app. A real fix would need host-issued per-connection tokens in feedBack core, which isn't planned while the app has no broader auth layer (see [splitscreen#24](https://github.com/get-flashbacks/feedBack-plugin-splitscreen/issues/24)).
 
 ## Settings
 
@@ -261,7 +303,7 @@ Plugins that need to act on individual panels — apply a per-panel setting, mou
 const ss = window.feedBackSplitscreen || window.slopsmithSplitscreen;
 if (ss && ss.isActive()) {
     for (const p of ss.getPanels()) {
-        // p = { index, name, canvas, focused, poppedOut }
+        // p = { index, name, canvas, focused, poppedOut, player_context }
         console.log(p.index, p.name, p.focused);
     }
 }
@@ -270,7 +312,8 @@ if (ss && ss.isActive()) {
 | Member | Returns / effect |
 |--------|------------------|
 | `isActive()` | `true` while split (or in a follower window that has built its panels) |
-| `getPanels()` | `[{ index, name, canvas, focused, poppedOut }]` for the current window — including a **follower window's own panels** once it has split |
+| `getPanels()` | `[{ index, name, canvas, focused, poppedOut, player_context }]` for the current window — including a **follower window's own panels** once it has split. `player_context` is the panel's published player identity, or `null` for a panel that hasn't published one yet *and* for every panel on a host without the per-player identity API (core `7633211`) |
+| `hostFeatures()` | which optional host APIs this feedBack build provides — see [Host compatibility](#host-compatibility) |
 | `panelIndexFor(canvas)` | the panel index a highway `canvas` belongs to (or `null`) |
 | `isCanvasFocused(canvas)` | whether that canvas's panel is the focused one |
 | `panelName(i)` / `setPanelName(i, name)` | read / set a panel's name |
@@ -308,8 +351,9 @@ Messages arrive in the order listed above. Do not start rendering until you rece
 
 ## Requirements
 
-- feedBack with the highway factory (`createHighway()`) and `setRenderer` support exposed on `window` — available in all recent builds (slopsmith#36)
+- feedBack exposing the highway factory (`createHighway()`) on `window` and `setRenderer` support — required for every panel; source-level present since core `v0.3.0-alpha.1`. Optional features (LAN sharing, coordinated rendering, per-player identity) each need their own host API — see [Host compatibility](#host-compatibility)
 - A song with ≥2 arrangements to see any benefit; 1-arrangement songs simply render the same view in every panel
+- **For [Visual Export](https://github.com/get-flashbacks/feedback-plugin-visual-export) users:** split screen `1.14.8` or newer (the release that added `beginOfflineRender()` / `renderFrameAt()` / `endOfflineRender()`) on a host at or after core `f7c761c`. Visual Export drives one shared frame across all panels, so it needs the coordinated-rendering row above — see [visual-export#6](https://github.com/get-flashbacks/feedback-plugin-visual-export/issues/6)
 
 ## Other Plugins
 
