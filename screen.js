@@ -2144,26 +2144,57 @@ try {
      * until that toggle is on — e.g. 3D Highway's "Locked zoom" does nothing
      * unless "Lock camera at frets 1-12" is enabled. Only toggles can gate;
      * an unknown or non-toggle `dependsOn` is ignored, so the control stays
-     * usable. The gating checkbox is read live, so this follows both the
-     * saved value at build time and later clicks.
+     * usable.
+     *
+     * A bad descriptor must never brick a control, so a control that names
+     * itself, or sits on a dependency cycle (A -> B -> A), is treated as
+     * ungated. Gating is transitive: a control behind a gate that is itself
+     * greyed out is greyed out too, so there is never an editable control
+     * behind an unreachable gate. Gates are read live, so this follows both
+     * the saved value at build time and later clicks.
      */
     function _wireVizControlDeps(controls, built) {
-        for (const ctl of controls) {
+        const byKey = Object.create(null);
+        for (const c of controls) byKey[c.key] = c;
+        // The control `ctl` is gated by, or null when it has no valid gate.
+        const gateOf = (ctl) => {
             const dep = typeof ctl.dependsOn === 'string' ? ctl.dependsOn : null;
-            const me = built[ctl.key];
-            const gate = dep && built[dep];
-            const depCtl = dep && controls.find(c => c.key === dep);
-            if (!me || !gate || !depCtl || depCtl.type !== 'toggle') continue;
-            const apply = () => {
-                const on = !!gate.input.checked;
+            const depCtl = dep && dep !== ctl.key ? byKey[dep] : null;
+            return depCtl && depCtl.type === 'toggle' && built[dep] && built[ctl.key] ? depCtl : null;
+        };
+        // Walking the gate chain from `key` comes back to `key`.
+        const inCycle = (key) => {
+            const seen = new Set([key]);
+            for (let g = gateOf(byKey[key]); g; g = gateOf(g)) {
+                if (g.key === key) return true;
+                if (seen.has(g.key)) return false; // a cycle further on, not through `key`
+                seen.add(g.key);
+            }
+            return false;
+        };
+        const gated = controls.filter(c => gateOf(c) && !inCycle(c.key));
+        if (!gated.length) return;
+        // Whether `ctl` is usable: no live gate, or its gate is on AND usable.
+        // Chains end because every cycle member is excluded from `gated`.
+        const usable = (ctl) => {
+            if (!gated.includes(ctl)) return true;
+            const gate = gateOf(ctl);
+            return !!built[gate.key].input.checked && usable(gate);
+        };
+        const refresh = () => {
+            for (const ctl of gated) {
+                const on = usable(ctl);
+                const me = built[ctl.key];
                 me.input.disabled = !on;
                 me.row.style.opacity = on ? '' : '0.4';
                 me.row.style.cursor = on ? 'pointer' : 'not-allowed';
-                me.row.title = on ? '' : 'Requires "' + depCtl.label + '"';
-            };
-            gate.input.addEventListener('change', apply);
-            apply();
+                me.row.title = on ? '' : 'Requires "' + gateOf(ctl).label + '"';
+            }
+        };
+        for (const gateKey of new Set(gated.map(c => gateOf(c).key))) {
+            built[gateKey].input.addEventListener('change', refresh);
         }
+        refresh();
     }
 
     /**
