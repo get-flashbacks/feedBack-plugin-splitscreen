@@ -1741,6 +1741,8 @@ function makeVizElementStub(tag) {
         textContent: '',
         value: '',
         checked: false,
+        disabled: false,
+        title: '',
         min: '',
         max: '',
         step: '',
@@ -2214,6 +2216,113 @@ test('buildVizPopover creates a checkbox for toggle controls and fires onchange'
     checkboxEl.checked = false;
     checkboxEl.onchange();
     assert.equal(global.localStorage.getItem('h3d_bg_panel0_cameraLockLow'), 'false');
+});
+
+// ── buildVizPopover: dependsOn greying ───────────────────────────────────────
+
+// makeVizElementStub discards addEventListener, so a `change` listener wired by
+// buildVizPopover would never run. This variant records listeners and can fire
+// them, which is what the dependsOn wiring needs.
+function makeListeningVizElement(tag) {
+    const el = makeVizElementStub(tag);
+    const listeners = {};
+    el.addEventListener = (type, fn) => { (listeners[type] = listeners[type] || []).push(fn); };
+    el.fire = (type) => { (listeners[type] || []).forEach((fn) => fn()); };
+    return el;
+}
+
+// Build the popover for `controls` and return { key: { row, input } }.
+// `saved` pre-sets per-panel values so a toggle can start ticked.
+function buildDepsPopover(controls, saved = {}) {
+    const mod = freshVizPlugin();
+    mod._setArrangementsForTest([{ name: 'Lead' }]);
+    window.feedBackViz_highway_3d = function () {};
+    window.feedBackViz_highway_3d.panelControls = controls;
+    for (const [key, v] of Object.entries(saved)) global.localStorage.setItem('h3d_bg_panel0_' + key, String(v));
+    const pop = makeVizElementStub('div');
+    const panel = { vizPopover: pop, vizMode: 'highway_3d' };
+    mod._setPanelsForTest([panel]);
+    const rows = [];
+    global.document.createElement = (tag) => {
+        const el = makeListeningVizElement(tag);
+        if (tag === 'label') rows.push(el);
+        return el;
+    };
+    mod.buildVizPopover(panel, 'highway_3d');
+    const out = {};
+    controls.forEach((ctl, i) => {
+        const row = rows[i];
+        out[ctl.key] = { row, input: row.children.find((c) => c.tagName === 'INPUT' || c.tagName === 'SELECT') };
+    });
+    return out;
+}
+
+const DEP_TOGGLE = { key: 'lock', label: 'Lock', type: 'toggle', default: false };
+const DEP_RANGE = { key: 'zoom', label: 'Zoom', type: 'range', default: 0.5, dependsOn: 'lock' };
+
+test('a control with dependsOn is disabled and dimmed until its toggle is on, and follows later clicks', () => {
+    const ui = buildDepsPopover([DEP_TOGGLE, DEP_RANGE]);
+    assert.equal(ui.zoom.input.disabled, true, 'starts disabled while the toggle is off');
+    assert.equal(ui.zoom.row.style.opacity, '0.4');
+    assert.match(ui.zoom.row.title, /Requires "Lock"/);
+    assert.equal(ui.lock.input.disabled, false, 'the gating toggle itself stays usable');
+
+    ui.lock.input.checked = true;
+    ui.lock.input.fire('change');
+    assert.equal(ui.zoom.input.disabled, false);
+    assert.equal(ui.zoom.row.style.opacity, '');
+    assert.equal(ui.zoom.row.title, '');
+
+    ui.lock.input.checked = false;
+    ui.lock.input.fire('change');
+    assert.equal(ui.zoom.input.disabled, true, 'greys out again when the toggle is cleared');
+});
+
+test('a dependsOn control starts enabled when its toggle was saved on', () => {
+    const ui = buildDepsPopover([DEP_TOGGLE, DEP_RANGE], { lock: true });
+    assert.equal(ui.zoom.input.disabled, false);
+    assert.equal(ui.zoom.row.style.opacity, '');
+});
+
+test('a missing or non-toggle dependsOn target is ignored and the control stays usable', () => {
+    const ui = buildDepsPopover([
+        { key: 'a', label: 'A', type: 'range', default: 0.5, dependsOn: 'nope' },
+        { key: 'r', label: 'R', type: 'range', default: 0.5 },
+        { key: 'b', label: 'B', type: 'range', default: 0.5, dependsOn: 'r' },
+    ]);
+    assert.equal(ui.a.input.disabled, false, 'unknown target');
+    assert.equal(ui.b.input.disabled, false, 'range is not a valid gate');
+});
+
+test('a control that depends on itself is not locked', () => {
+    const ui = buildDepsPopover([{ key: 'self', label: 'Self', type: 'toggle', default: false, dependsOn: 'self' }]);
+    assert.equal(ui.self.input.disabled, false, 'otherwise it could never be ticked again');
+    assert.ok(!ui.self.row.style.opacity, 'and not dimmed');
+});
+
+test('a dependsOn cycle leaves every member usable', () => {
+    const ui = buildDepsPopover([
+        { key: 'a', label: 'A', type: 'toggle', default: false, dependsOn: 'b' },
+        { key: 'b', label: 'B', type: 'toggle', default: false, dependsOn: 'a' },
+    ]);
+    assert.equal(ui.a.input.disabled, false);
+    assert.equal(ui.b.input.disabled, false);
+});
+
+test('gating is transitive: a control behind a greyed-out gate is greyed out too', () => {
+    const ui = buildDepsPopover([
+        { key: 'c', label: 'C', type: 'toggle', default: false },
+        { key: 'b', label: 'B', type: 'toggle', default: false, dependsOn: 'c' },
+        { key: 'a', label: 'A', type: 'range', default: 0.5, dependsOn: 'b' },
+    ], { b: true });
+    // B is saved on, but its own gate C is off, so A must not be live.
+    assert.equal(ui.b.input.disabled, true);
+    assert.equal(ui.a.input.disabled, true, 'checked-but-unreachable gate must not enable its dependent');
+
+    ui.c.input.checked = true;
+    ui.c.input.fire('change');
+    assert.equal(ui.b.input.disabled, false);
+    assert.equal(ui.a.input.disabled, false, 'follows once the root gate is on');
 });
 
 test('buildVizPopover re-fires the plugin setter when its onchange handler runs', () => {
