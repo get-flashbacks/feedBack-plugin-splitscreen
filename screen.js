@@ -2081,6 +2081,9 @@ try {
         title.textContent = (vizPlugins.find(p => p.id === pluginId)?.name || pluginId) + ' — this panel';
         title.style.cssText = 'font-size:10px;color:#6b7280;margin-bottom:6px;white-space:nowrap;';
         pop.appendChild(title);
+        // key -> { row, input } so a control that declares `dependsOn` can be
+        // greyed out while the toggle it depends on is off.
+        const built = Object.create(null);
         for (const ctl of controls) {
             const row = document.createElement('label');
             row.style.cssText = 'display:flex;align-items:center;gap:8px;margin:4px 0;font-size:11px;color:#cbd5e1;white-space:nowrap;cursor:pointer;';
@@ -2095,6 +2098,7 @@ try {
                 cb.onchange = () => _vizPanelSet(pluginId, panels.indexOf(panel), ctl, cb.checked);
                 row.appendChild(name);
                 row.appendChild(cb);
+                built[ctl.key] = { row, input: cb };
             } else if (ctl.type === 'range') {
                 const { lo, hi, st } = _ctlRange(ctl);
                 const sl = document.createElement('input');
@@ -2113,6 +2117,7 @@ try {
                 row.appendChild(name);
                 row.appendChild(sl);
                 row.appendChild(val);
+                built[ctl.key] = { row, input: sl };
             } else if (ctl.type === 'select') {
                 const sel = document.createElement('select');
                 sel.style.cssText = 'background:#1a1a2e;border:1px solid #333;border-radius:4px;padding:2px 4px;font-size:10px;color:#ccc;outline:none;';
@@ -2125,10 +2130,39 @@ try {
                 sel.onchange = () => _vizPanelSet(pluginId, panels.indexOf(panel), ctl, sel.value);
                 row.appendChild(name);
                 row.appendChild(sel);
+                built[ctl.key] = { row, input: sel };
             } else {
                 continue;
             }
             pop.appendChild(row);
+        }
+        _wireVizControlDeps(controls, built);
+    }
+
+    /**
+     * Grey out a control whose descriptor sets `dependsOn: '<toggle key>'`
+     * until that toggle is on — e.g. 3D Highway's "Locked zoom" does nothing
+     * unless "Lock camera at frets 1-12" is enabled. Only toggles can gate;
+     * an unknown or non-toggle `dependsOn` is ignored, so the control stays
+     * usable. The gating checkbox is read live, so this follows both the
+     * saved value at build time and later clicks.
+     */
+    function _wireVizControlDeps(controls, built) {
+        for (const ctl of controls) {
+            const dep = typeof ctl.dependsOn === 'string' ? ctl.dependsOn : null;
+            const me = built[ctl.key];
+            const gate = dep && built[dep];
+            const depCtl = dep && controls.find(c => c.key === dep);
+            if (!me || !gate || !depCtl || depCtl.type !== 'toggle') continue;
+            const apply = () => {
+                const on = !!gate.input.checked;
+                me.input.disabled = !on;
+                me.row.style.opacity = on ? '' : '0.4';
+                me.row.style.cursor = on ? 'pointer' : 'not-allowed';
+                me.row.title = on ? '' : 'Requires "' + depCtl.label + '"';
+            };
+            gate.input.addEventListener('change', apply);
+            apply();
         }
     }
 
