@@ -2152,6 +2152,8 @@ try {
      * greyed out is greyed out too, so there is never an editable control
      * behind an unreachable gate. Gates are read live, so this follows both
      * the saved value at build time and later clicks.
+     * @param {*} controls the descriptor list the popover was built from
+     * @param {*} built map of control key -> { row, input } for the built rows
      */
     function _wireVizControlDeps(controls, built) {
         const byKey = Object.create(null);
